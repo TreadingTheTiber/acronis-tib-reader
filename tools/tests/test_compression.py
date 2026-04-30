@@ -19,10 +19,15 @@ Run directly:  python3 tools/tests/test_compression.py
 """
 from __future__ import annotations
 
+import os
 import struct
 import sys
 
-sys.path.insert(0, "/path/to/tibread/dist")
+# Ensure the repo root is on sys.path so `import tibread` works whether the
+# package is pip-installed or we're running directly from a checkout.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from tibread import xpress
 from tibread.ntfs import (
