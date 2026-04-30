@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""
+discover_chunkmap.py — self-describing locator for the on-disk chunk map
+in an Acronis True Image sector-mode .tib backup.
+
+Reverse-engineered from `product.bin` (Acronis True Image binary):
+  - `ExtraFileChunkMap`         = FUN_089839b0 (k:/8029/resizer/backup/openimg.cpp)
+  - `GetExtraFileImageParameters` = FUN_08984460 (same file)
+
+`GetExtraFileImageParameters` walks an in-memory linked list, finds the node
+keyed by tag 5, and returns 12 bytes from offset +0x20C of that node.
+Those 12 bytes are `{u64 chunkmap_file_offset, u32 chunkmap_compressed_size}` —
+the (offset, size) handed to `ExtraFileChunkMap`.
+
+The on-disk source of those values is the .tib's metadata blob (the 780-byte
+TLV blob that sits right before the 41-byte sector trailer body, at file
+offset `data_start + metaDataOffset`).
+
+== TLV layout decoded ==
+
+The metadata blob is a TLV with various tags (0x4D, 0xD6, 0xD7, 0x8F, 0x48-
+0x4F, 0x58, 0x81, 0x98, 0xA9, ...) describing the source machine, device
+model, GUIDs, computer name, etc.  Inside one of those records (after the
+"EXAMPLE-PC-Dgs"-style computer-name value in our sample) the chunk-map
+locator is encoded as positional length-prefixed fields:
+
+    01 00                 # 1-byte field, value 0x00 (purpose unknown)
+    06 <6 byte LE>        # 6-byte LE: chunk-map TLV start, in CONCAT coords
+                          # (concat = file - data_start, where data_start = 32)
+    01 00                 # 1-byte field, value 0x00
+    03 <3 byte LE>        # 3-byte LE: total chunk-map region size
+                          # (= TLV preamble length + zlib stream length)
+    [ ... rest of chunk-map's own TLV preamble copied here ... ]
+
+The chunk map itself sits at `data_start + concat_offset` in file coords
+and consists of:
+
+    [1 byte: preamble_payload_len = 0x13]
+    [19 bytes: preamble payload — 0x02-tag fields + the chunk-count etc.]
+    [zlib-deflated stream]   <- starts with magic 78 01
+
+The "preamble" is a small StoreReader-style header.  `build_skipmap_from_tib`
+seeks past it (preamble_size = 1 + first_byte = 20 in this generation) and
+hands the raw zlib stream to `zlib.decompress`.
+
+== Discovery algorithm ==
+
+1. Open the .tib, parse the volume header to get `data_start` (=32 for v0).
+2. Parse the volume footer for `slice_size`, then read 8 bytes at
+   `data_start + slice_size - 8` to get `trailer_size`.
+3. Read the trailer body and parse `metaDataOffset` (offset 3..8, 6-byte LE,
+   in concat coords).
+4. Compute `metadata_blob_file_offset = data_start + metaDataOffset` and
+   read backward to find a 780-ish-byte blob ending at the trailer body start.
+   In practice the blob is a known size (we read 1 KiB before the trailer
+   body and search the tail for our signature; the blob may be smaller or
+   bigger across generations).
+5. In that blob, search for the 13-byte signature
+       06 <??>{6} 01 00 03 <??>{3}
+   where:
+     - the 6-byte LE value V is in `(1_000_000_000, metaDataOffset)`
+     - the 3-byte LE value S is in `(1024, 100_000_000)`
+   This pattern is unique on the test file.
+6. Compute:
+     chunkmap_tlv_file_offset = data_start + V
+     preamble_size            = 1 + first byte at chunkmap_tlv_file_offset
+                                (= 0x13 + 1 = 20 on this file)
+     zlib_offset              = chunkmap_tlv_file_offset + preamble_size
+     zlib_size                = S - preamble_size
+
+Returns `(zlib_offset, zlib_size)` — the args expected by the existing
+`build_skipmap_from_tib.decode_chunk_map(...)`.
+
+== Verification on /path/to/example_full_b1_s1_v1.tib ==
+
+  metaDataOffset           = 1,143,108,355,647  (concat)
+  V (chunkmap_concat)       = 1,143,065,854,211  (concat; metaDataOffset - 42,501,436)
+  S (total_size)            = 1,837,856          (= 20 + 1,837,836)
+  preamble_size             = 20
+  → zlib_offset             = 1,143,065,854,263  (matches DEFAULT_TIB_OFFSET)
+  → zlib_size               = 1,837,836           (matches DEFAULT_COMPRESSED_SIZE)
+
+Output skipmap CSV is byte-identical to the one produced with the
+hardcoded constants.
+"""
+from __future__ import annotations
+import os
+import struct
+from pathlib import Path
+from typing import Tuple
+
+VOLUME_MAGIC = 0xA2B924CE
+TRAILER_SECTOR = bytes.fromhex("2B8AE194")
+TRAILER_FS = bytes.fromhex("2C8AE194")
+
+
+def _read_volume_header(f) -> Tuple[int, int]:
+    """Returns (data_start, version)."""
+    f.seek(0)
+    buf = f.read(32)
+    magic, hdrlen, version = struct.unpack_from("<IHH", buf, 0)
+    if magic != VOLUME_MAGIC:
+        raise ValueError(f"not a TIB file (magic={magic:#x})")
+    return hdrlen, version
+
+
+def _read_trailer(f, file_size: int) -> Tuple[int, int, int, int]:
+    """Returns (data_start, slice_size, metaDataOffset, trailer_body_size).
+    metaDataOffset is in concat coords (relative to data_start)."""
+    data_start, version = _read_volume_header(f)
+    if version != 0:
+        raise ValueError(f"only Windows v0 sector .tib supported (version={version})")
+
+    # Volume footer: last 48 bytes; slice_size at footer offset 8 (LE u64)
+    f.seek(file_size - 48)
+    footer = f.read(48)
+    slice_size = struct.unpack_from("<Q", footer, 8)[0]
+
+    concat_end_file = data_start + slice_size
+
+    # Last 4 bytes of concat = sector magic
+    f.seek(concat_end_file - 4)
+    magic = f.read(4)
+    if magic != TRAILER_SECTOR:
+        raise ValueError(
+            f"only sector-mode .tib supported here (trailer magic={magic.hex()})"
+        )
+
+    f.seek(concat_end_file - 8)
+    trailer_size = struct.unpack("<I", f.read(4))[0]
+
+    f.seek(concat_end_file - 8 - trailer_size)
+    body = f.read(trailer_size)
+
+    # Trailer body offset 2 = length byte (=6); offset 3..8 = 6-byte LE metaDataOffset
+    if body[2] != 6:
+        raise ValueError(f"unexpected trailer body byte[2]={body[2]:#x} (want 0x06)")
+    meta_offset = int.from_bytes(body[3:9], "little")
+
+    return data_start, slice_size, meta_offset, trailer_size
+
+
+def discover_chunkmap_offset(tib_path: str) -> Tuple[int, int]:
+    """Find the on-disk chunk-map zlib stream's file offset and compressed size.
+
+    Returns (zlib_offset, zlib_size) suitable for
+    `build_skipmap_from_tib.decode_chunk_map(tib_path, file_offset, compressed_size)`.
+
+    Raises ValueError if the chunk-map locator can't be uniquely identified.
+    """
+    file_size = os.path.getsize(tib_path)
+    with open(tib_path, "rb") as f:
+        data_start, slice_size, meta_offset, trailer_size = _read_trailer(f, file_size)
+
+        # Metadata blob lives between previous-record-end and the trailer body.
+        # Read a generous 4 KiB before the trailer body and search its tail for
+        # the chunk-map locator signature.  The blob is ~780 bytes in this
+        # generation but may be larger in other backups.
+        concat_end_file = data_start + slice_size
+        trailer_body_start = concat_end_file - 8 - trailer_size
+        metadata_blob_end = trailer_body_start
+        scan_window = 4096
+        scan_start = max(data_start, metadata_blob_end - scan_window)
+        f.seek(scan_start)
+        blob = f.read(metadata_blob_end - scan_start)
+
+        # Search for the unique signature:
+        #   06 <V:6 LE> 01 00 03 <S:3 LE>
+        # where:
+        #   meta_offset - 1 GiB < V < meta_offset
+        #   1024 < S < 100 MiB
+        candidates = []
+        n = len(blob)
+        for i in range(n - 12):
+            if (
+                blob[i] == 0x06
+                and blob[i + 7] == 0x01
+                and blob[i + 8] == 0x00
+                and blob[i + 9] == 0x03
+            ):
+                V = int.from_bytes(blob[i + 1 : i + 7], "little")
+                S = int.from_bytes(blob[i + 10 : i + 13], "little")
+                # V is a concat offset; sane range: positive, less than
+                # meta_offset, and within ~1 GiB before it (chunk map is
+                # typically tens of MB before the metadata blob).
+                if (
+                    0 < V < meta_offset
+                    and (meta_offset - V) < (1 << 30)
+                    and 1024 < S < (100 << 20)
+                ):
+                    candidates.append((scan_start + i, V, S))
+
+        if not candidates:
+            raise ValueError(
+                f"no chunk-map locator found in metadata blob "
+                f"(scanned {scan_start}..{metadata_blob_end})"
+            )
+        if len(candidates) > 1:
+            # Disambiguate by smallest distance to meta_offset (chunk map sits
+            # closest before the metadata blob; the MD5 dedup table sits between
+            # them).  We pick the FARTHEST candidate from meta_offset within
+            # the post-data region — but in practice on this generation the
+            # signature is unique.  If we ever see multiple, the chunk map is
+            # the one whose V points to the start of the post-data region.
+            candidates.sort(key=lambda c: -c[1])  # smallest V first... actually largest V is closest to meta
+            # Pick the one with smallest V (farthest from meta_offset = start of post-data region)
+            candidates.sort(key=lambda c: c[1])
+            chosen = candidates[0]
+        else:
+            chosen = candidates[0]
+
+        _blob_pos, V, S = chosen
+
+        # Read first byte of the chunkmap TLV preamble to get its size.
+        chunkmap_tlv_file = data_start + V
+        f.seek(chunkmap_tlv_file)
+        first_byte = f.read(1)[0]
+        preamble_size = 1 + first_byte  # 1 length byte + payload
+
+        zlib_offset = chunkmap_tlv_file + preamble_size
+        zlib_size = S - preamble_size
+
+        # Sanity: zlib stream should start with 78 01 (or 78 9C / 78 DA)
+        f.seek(zlib_offset)
+        zhdr = f.read(2)
+        if zhdr[:1] != b"\x78":
+            raise ValueError(
+                f"computed zlib_offset {zlib_offset} doesn't start with 0x78 "
+                f"(got {zhdr.hex()}); discovery failed"
+            )
+
+        return zlib_offset, zlib_size
+
+
+def main():
+    import sys
+
+    if len(sys.argv) != 2:
+        print("Usage: python3 discover_chunkmap.py <path_to_tib>")
+        sys.exit(1)
+    tib = sys.argv[1]
+    offset, size = discover_chunkmap_offset(tib)
+    print(f"chunk-map zlib stream:")
+    print(f"  file offset:     {offset:,}")
+    print(f"  compressed size: {size:,}")
+
+
+if __name__ == "__main__":
+    main()
