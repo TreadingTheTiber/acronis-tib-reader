@@ -162,10 +162,16 @@ def _read_trailer(f, file_size: int) -> Tuple[int, int, int, int]:
     f.seek(concat_end_file - 8 - trailer_size)
     body = f.read(trailer_size)
 
-    # Trailer body offset 2 = length byte (=6); offset 3..8 = 6-byte LE metaDataOffset
-    if body[2] != 6:
-        raise ValueError(f"unexpected trailer body byte[2]={body[2]:#x} (want 0x06)")
-    meta_offset = int.from_bytes(body[3:9], "little")
+    # Trailer body byte[2] = length-prefix byte for the metaDataOffset field.
+    # For files larger than 4 GB but ≤2⁴⁸ bytes (older small .tib) this is 5;
+    # for files needing a 6-byte LE encoding (~256 TB max) it's 6. Accept any
+    # plausible value 4..8 to handle the full size range.
+    n = body[2]
+    if not (4 <= n <= 8):
+        raise ValueError(f"unexpected trailer body byte[2]={body[2]:#x} (want 4..8)")
+    if 3 + n > len(body):
+        raise ValueError(f"trailer body too short for {n}-byte metaDataOffset")
+    meta_offset = int.from_bytes(body[3:3 + n], "little")
 
     return data_start, slice_size, meta_offset, trailer_size
 
@@ -221,9 +227,15 @@ def discover_chunkmap_offset(tib_path: str) -> Tuple[int, int]:
                     candidates.append((scan_start + i, V, S))
 
         if not candidates:
-            raise ValueError(
-                f"no chunk-map locator found in metadata blob "
-                f"(scanned {scan_start}..{metadata_blob_end})"
+            raise UnsupportedTibFormat(
+                "this .tib has a valid sector-mode header but no on-disk "
+                "chunk-map locator was found in its metadata blob. "
+                "This usually means the file is a pre-2018 Acronis True "
+                "Image generation (TI 2014/2015/2016) that predates the "
+                "ExtraFileChunkMap feature. tibread can't random-access "
+                "such files yet — supporting them would require a full "
+                "sequential scan of the block stream to build an index "
+                "(slow, ~3 hours per TB). PRs welcome."
             )
         if len(candidates) > 1:
             # Disambiguate by smallest distance to meta_offset (chunk map sits
