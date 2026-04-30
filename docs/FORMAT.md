@@ -1,8 +1,18 @@
 # Acronis True Image `.tib` (sector-mode) — format specification
 
 **Generation covered**: Acronis True Image v23.x (Acronis True Image 2018+).
-Verified against build 17750. Older generations (TI 2014, TI 2018 early
-builds) are similar but may differ in trailer encoding; see "Format variants".
+Verified against build 17750.
+
+For the **legacy** sector-mode variant (TI 2014/2015/2016, identified by the
+absence of TLV tag `0x9b` in the metadata blob), see
+[`FORMAT_LEGACY.md`](FORMAT_LEGACY.md). It uses 8-byte preambles + 64-cluster
+blocks, splits the chunk map into inline records, and has a smaller trailing
+metadata blob, but shares the outer skeleton (volume header, footer, trailer
+magic) with the modern format documented here.
+
+For the **very-legacy** sector-mode variant (TI 2010-2013, requires
+destructive in-place migration by Acronis), see
+[`FORMAT_VERY_LEGACY.md`](FORMAT_VERY_LEGACY.md). `tibread` rejects these.
 
 This spec captures the on-disk layout sufficient to read a sector-mode `.tib`
 without any Acronis software. It's the consolidated output of about 25
