@@ -131,6 +131,23 @@ def _read_volume_header(f) -> Tuple[int, int]:
             f"file does not appear to be an Acronis .tib backup "
             f"(magic={magic:#010x}, expected {VOLUME_MAGIC:#010x} for sector-mode)."
         )
+
+    # "Very-legacy" detection (TI 2010-2013, builds 12000-15999):
+    #   version == 1 AND header u32 at +0x1C == 0x1000 (4 KiB sector_size)
+    # Acronis's own reader handles these by destructively MIGRATING the file
+    # in-place to the modern format (`ConvertFromLegacyFormat`, FUN_091f6780).
+    # We refuse to read them — recommend the user open in TI 2018+ once to
+    # migrate, then come back. Per RE agent's recommendation in
+    # docs/FORMAT_VERY_LEGACY.md.
+    sector_size = struct.unpack_from("<I", buf, 0x1C)[0]
+    if version == 1 and sector_size == 0x1000:
+        raise UnsupportedTibFormat(
+            "this is a very-legacy .tib (TI 2010-2013, version=1 + sector_size=0x1000). "
+            "Acronis True Image 2018+ reads these by destructively migrating "
+            "them in-place to the modern format. tibread doesn't support "
+            "in-place migration. To read this file: open it ONCE in TI 2018+ "
+            "(this will rewrite it as a modern .tib in place), then re-run tibread."
+        )
     return hdrlen, version
 
 
