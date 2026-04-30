@@ -437,10 +437,32 @@ class NtfsVolume:
         spc = boot[0x0D]
         cluster_size = bps * spc
         bpb_mft = struct.unpack_from("<Q", boot, 0x30)[0]
-        # Read a window of clusters around bpb_mft (search both directions)
+
+        # Fast path: if the BPB's MFT_LCN points at a valid record-0 FILE0
+        # record, just use that. Avoids picking up the MFT_MIRR (4 records
+        # at LCN bpb_mftmirr) when MFT_MIRR sits before MFT in the disk.
+        cand = disk_reader.read(bpb_mft * cluster_size, max(cluster_size, 1024))
+        if cand[:4] == b"FILE":
+            rec_num = struct.unpack_from("<I", cand, 44)[0]
+            if rec_num == 0:
+                return bpb_mft
+
+        # Slow path: BPB's MFT_LCN doesn't validate (e.g. defrag-shifted volume
+        # or weird Acronis re-mapping). Scan forward from a window before
+        # bpb_mft, but SKIP candidate matches at MFT_MIRR (4 records at
+        # bpb_mftmirr) so we don't lock onto the mirror.
+        bpb_mftmirr = struct.unpack_from("<Q", boot, 0x38)[0]
+        clusters_per_mft = struct.unpack_from("<b", boot, 0x40)[0]
+        if clusters_per_mft < 0:
+            mft_record_size = 1 << (-clusters_per_mft)
+        else:
+            mft_record_size = max(1, clusters_per_mft) * cluster_size
+        # MFT_MIRR holds 4 records; skip that LCN range from the scan.
+        mirr_clusters = max(1, (4 * mft_record_size) // cluster_size)
+        mirr_range = (bpb_mftmirr, bpb_mftmirr + mirr_clusters)
+
         window_clusters = search_radius_clusters
         scan_lcn_start = max(0, bpb_mft - window_clusters)
-        # Scan in 1MB chunks for "FILE0" magic at cluster boundary
         chunk_clusters = 256  # 1 MB at 4KB clusters
         chunk_bytes = chunk_clusters * cluster_size
         lcn = scan_lcn_start
@@ -450,12 +472,16 @@ class NtfsVolume:
                 break
             for i in range(0, len(data), cluster_size):
                 if data[i:i + 4] == b"FILE":
-                    # Validate it's record 0 of the MFT (rec_num=0, $DATA non-resident)
                     rec_num = struct.unpack_from("<I", data, i + 44)[0]
                     if rec_num == 0:
-                        return lcn + i // cluster_size
+                        cand_lcn = lcn + i // cluster_size
+                        if not (mirr_range[0] <= cand_lcn < mirr_range[1]):
+                            return cand_lcn
             lcn += chunk_clusters
-        raise ValueError(f"could not find $MFT (record 0) within {search_radius_clusters} clusters of LCN {bpb_mft}")
+        raise ValueError(
+            f"could not find $MFT (record 0) within {search_radius_clusters} "
+            f"clusters of LCN {bpb_mft}"
+        )
 
     # ----- boot sector ------------------------------------------------------
 

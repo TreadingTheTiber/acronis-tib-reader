@@ -3,13 +3,27 @@
 tibreader - random-access partition reader for sector-by-sector TIB files.
 
 Format model (verified):
-- Each block covers 128 fixed clusters (LCNs N*128 .. N*128+127) of 4096 bytes
-- 16-byte preamble = 128-bit bitmap; bit i set iff LCN (N*128 + i) is stored
-- Decompressed block contains exactly the present clusters in LCN order
-- Sparse (bit-clear) clusters return zeros at runtime
+- Each block covers a fixed number of clusters (LCNs N*K .. N*K+K-1)
+  of 4096 bytes each. K = clusters_per_block.
+    - Modern (TI 2018+):    K = 128, preamble = 16 bytes (128-bit bitmap)
+    - Legacy (TI 2014-16):  K =  64, preamble =  8 bytes ( 64-bit bitmap)
+- Bit i of the preamble is set iff LCN (N*K + i) is stored.
+- Decompressed block contains exactly the present clusters in LCN order.
+- Sparse (bit-clear) clusters return zeros at runtime.
 
 Reader exposes read(offset, length) over the FULL original partition layout
-(including sparse zeros). Backed by a precomputed block index from tibindex.py.
+(including sparse zeros). Backed by a precomputed block index from indexer.py.
+
+Index file formats supported:
+
+  TIBIDX02 (modern only — historical):
+    [b"TIBIDX02"][u64 tib_size][u64 data_start][u64 data_end][u64 block_count]
+    block_count × {u64 file_offset, 16-byte preamble, u32 comp_len}
+
+  TIBIDX03 (modern + legacy, geometry-explicit):
+    [b"TIBIDX03"][u64 tib_size][u64 data_start][u64 data_end][u64 block_count]
+    [u32 clusters_per_block][u32 preamble_len][u64 reserved_flags]
+    block_count × {u64 file_offset, preamble_len-byte preamble, u32 comp_len}
 """
 import os
 import struct
@@ -18,12 +32,17 @@ import threading
 from collections import OrderedDict
 
 VOLUME_HEADER_LEN = 32
-PREAMBLE_LEN = 16
 CLUSTER_SIZE = 4096
+
+# Modern defaults — kept for backward compatibility with the TIBIDX02
+# layout (which has no explicit geometry fields).
+PREAMBLE_LEN = 16
 CLUSTERS_PER_BLOCK = 128
 BLOCK_SIZE = CLUSTER_SIZE * CLUSTERS_PER_BLOCK  # 524288
-INDEX_MAGIC = b"TIBIDX02"
-INDEX_REC_SIZE = 28  # u64 file_offset, 16 bytes preamble, u32 comp_len
+
+INDEX_MAGIC = b"TIBIDX02"        # modern, fixed 16B preamble + 128 cpb
+INDEX_MAGIC_V3 = b"TIBIDX03"     # explicit geometry; supports legacy too
+INDEX_REC_SIZE = 28  # u64 file_offset, 16 bytes preamble, u32 comp_len (TIBIDX02)
 
 
 class LRUCache:
@@ -52,22 +71,37 @@ class TibReader:
 
     def __init__(self, tib_path: str, index_path: str, cache_blocks: int = 128):
         self.tib_path = tib_path
-        # Memory-map the index for cheap access
         with open(index_path, "rb") as f:
             magic = f.read(8)
-            if magic != INDEX_MAGIC:
+            if magic == INDEX_MAGIC:
+                # TIBIDX02 — modern only.
+                self.tib_size, self.data_start, self.data_end, self.block_count = \
+                    struct.unpack("<QQQQ", f.read(32))
+                self.clusters_per_block = CLUSTERS_PER_BLOCK
+                self.preamble_len = PREAMBLE_LEN
+                self._rec_size = INDEX_REC_SIZE
+                self.records_blob = f.read(self.block_count * self._rec_size)
+            elif magic == INDEX_MAGIC_V3:
+                # TIBIDX03 — geometry-explicit (modern + legacy).
+                self.tib_size, self.data_start, self.data_end, self.block_count = \
+                    struct.unpack("<QQQQ", f.read(32))
+                cpb, plen, _flags = struct.unpack("<IIQ", f.read(16))
+                self.clusters_per_block = cpb
+                self.preamble_len = plen
+                # Per-record layout: u64 file_off + plen preamble + u32 comp_len
+                self._rec_size = 8 + plen + 4
+                self.records_blob = f.read(self.block_count * self._rec_size)
+            else:
                 raise ValueError(f"bad index magic: {magic.hex()}")
-            self.tib_size, self.data_start, self.data_end, self.block_count = \
-                struct.unpack("<QQQQ", f.read(32))
-            self.records_blob = f.read(self.block_count * INDEX_REC_SIZE)
-        if len(self.records_blob) != self.block_count * INDEX_REC_SIZE:
+        if len(self.records_blob) != self.block_count * self._rec_size:
             raise ValueError("truncated index")
-        # Each block covers 128 LCNs starting at (block_idx * 128). Total partition
-        # size in clusters = block_count * 128.
-        self.partition_size = self.block_count * BLOCK_SIZE
+        self.block_size = self.clusters_per_block * CLUSTER_SIZE
+        self.partition_size = self.block_count * self.block_size
         # Open file handle per thread (for FUSE multi-threaded reads)
         self._tls = threading.local()
         self.cache = LRUCache(cache_blocks)
+        # Pre-build a struct format string for record decoding.
+        self._rec_fmt = f"<Q{self.preamble_len}sI"
 
     def _file(self):
         if not hasattr(self._tls, "f"):
@@ -78,8 +112,8 @@ class TibReader:
         """Returns (file_offset, preamble_bytes, comp_len) for block block_idx."""
         if block_idx < 0 or block_idx >= self.block_count:
             raise IndexError(f"block {block_idx} out of range [0, {self.block_count})")
-        off = block_idx * INDEX_REC_SIZE
-        return struct.unpack_from("<Q16sI", self.records_blob, off)
+        off = block_idx * self._rec_size
+        return struct.unpack_from(self._rec_fmt, self.records_blob, off)
 
     def _decompress_block(self, block_idx: int) -> bytes:
         """Returns the full decompressed block (only present clusters concatenated)."""
@@ -88,8 +122,8 @@ class TibReader:
             return cached
         file_off, preamble, comp_len = self._get_record(block_idx)
         f = self._file()
-        f.seek(file_off + PREAMBLE_LEN)
-        comp_data = f.read(comp_len - PREAMBLE_LEN)
+        f.seek(file_off + self.preamble_len)
+        comp_data = f.read(comp_len - self.preamble_len)
         decomp = zlib.decompressobj()
         out = decomp.decompress(comp_data)
         # Trust trail-bytes; nothing more to do
@@ -121,10 +155,10 @@ class TibReader:
 
     def read_cluster(self, lcn: int) -> bytes:
         """Read one cluster (4096 bytes) at LCN. Returns zeros if sparse or out of range."""
-        block_idx = lcn // CLUSTERS_PER_BLOCK
+        block_idx = lcn // self.clusters_per_block
         if block_idx >= self.block_count:
             return b"\x00" * CLUSTER_SIZE
-        local = lcn % CLUSTERS_PER_BLOCK
+        local = lcn % self.clusters_per_block
         preamble = self._block_preamble(block_idx)
         if not self._bit_set(preamble, local):
             return b"\x00" * CLUSTER_SIZE
@@ -149,8 +183,8 @@ class TibReader:
         while cur < end:
             cluster = cur // CLUSTER_SIZE
             in_cluster = cur % CLUSTER_SIZE
-            block_idx = cluster // CLUSTERS_PER_BLOCK
-            local = cluster % CLUSTERS_PER_BLOCK
+            block_idx = cluster // self.clusters_per_block
+            local = cluster % self.clusters_per_block
 
             if block_idx >= self.block_count:
                 # Beyond indexed area = sparse zeros
@@ -183,12 +217,20 @@ def cmd_info(idx_path: str):
     with open(idx_path, "rb") as f:
         magic = f.read(8)
         tib_size, data_start, data_end, block_count = struct.unpack("<QQQQ", f.read(32))
+        if magic == INDEX_MAGIC_V3:
+            cpb, plen, _flags = struct.unpack("<IIQ", f.read(16))
+        elif magic == INDEX_MAGIC:
+            cpb, plen = CLUSTERS_PER_BLOCK, PREAMBLE_LEN
+        else:
+            raise ValueError(f"unknown index magic: {magic!r}")
+    block_size = cpb * CLUSTER_SIZE
     print(f"Index: {idx_path}")
     print(f"  magic: {magic}")
     print(f"  tib_file_size: {tib_size:,}")
     print(f"  data range: [{data_start:,} .. {data_end:,})")
     print(f"  block count: {block_count:,}")
-    print(f"  partition size (clusters * 4096): {block_count * BLOCK_SIZE:,} (~{block_count * BLOCK_SIZE / 1024**4:.2f} TiB)")
+    print(f"  geometry: clusters_per_block={cpb}, preamble_len={plen}")
+    print(f"  partition size (clusters * 4096): {block_count * block_size:,} (~{block_count * block_size / 1024**4:.2f} TiB)")
 
 
 def cmd_dump(tib: str, idx: str, offset: int, length: int, out: str):
@@ -207,7 +249,7 @@ def cmd_stat(tib: str, idx: str):
     for i in range(r.block_count):
         _, preamble, _ = r._get_record(i)
         total_present += sum(bin(b).count("1") for b in preamble)
-    total_clusters = r.block_count * CLUSTERS_PER_BLOCK
+    total_clusters = r.block_count * r.clusters_per_block
     print(f"blocks: {r.block_count:,}")
     print(f"clusters total: {total_clusters:,}")
     print(f"clusters present: {total_present:,}")

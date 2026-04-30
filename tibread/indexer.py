@@ -35,9 +35,18 @@ import struct
 from pathlib import Path
 from typing import Optional
 
-from .chunkmap_locator import discover_chunkmap_offset
+from .chunkmap_locator import discover_chunkmap_offset, detect_format_era
 from .chunkmap import decode_chunk_map
-from .reader import TibReader, INDEX_MAGIC, INDEX_REC_SIZE, VOLUME_HEADER_LEN
+from .chunkmap_legacy import (
+    discover_inline_chunkmaps_legacy,
+    decode_chunkmap_legacy_from_md_offsets,
+)
+from .reader import (
+    TibReader,
+    INDEX_MAGIC,
+    INDEX_MAGIC_V3,
+    VOLUME_HEADER_LEN,
+)
 
 
 def _default_index_path(tib_path: str | os.PathLike) -> Path:
@@ -68,12 +77,28 @@ def build_index(
     if index_path.exists() and not force:
         return index_path
 
-    # Step 1: locate the chunk map (self-describing — no hardcoded constants)
+    # Step 1: classify modern vs legacy.
     if progress:
-        print(f"[tibread] discovering chunk-map location in {tib_path.name}...", flush=True)
+        print(f"[tibread] detecting format era of {tib_path.name}...", flush=True)
+    era = detect_format_era(str(tib_path))
+    if progress:
+        print(f"[tibread]   format era: {era}", flush=True)
+
+    if era == "legacy":
+        return _build_index_legacy(tib_path, index_path, progress=progress)
+    return _build_index_modern(tib_path, index_path, progress=progress)
+
+
+def _build_index_modern(tib_path: Path, index_path: Path, *, progress: bool) -> Path:
+    # Modern: discover the on-disk chunk-map zlib stream, decode, then
+    # collect each stored block's 16-byte preamble for the index.
+    if progress:
+        print(
+            f"[tibread] discovering chunk-map location in {tib_path.name}...",
+            flush=True,
+        )
     chunkmap_off, chunkmap_size = discover_chunkmap_offset(str(tib_path))
 
-    # Step 2: decode the chunk map → one record per partition_block
     if progress:
         print(
             f"[tibread] decoding chunk map at offset {chunkmap_off:,}, "
@@ -92,9 +117,6 @@ def build_index(
             flush=True,
         )
 
-    # Step 3: read each stored block's 16-byte preamble from the .tib.
-    # Sort by file_offset for sequential I/O (much faster on spinning disks
-    # and remote mounts). Each preamble is the cluster-presence bitmap.
     if progress:
         print(
             f"[tibread] reading {n_stored:,} preambles "
@@ -123,7 +145,6 @@ def build_index(
             f.seek(foff)
             preambles[pb] = f.read(16)
 
-    # Step 4: write the partition-direct index
     if progress:
         print(f"[tibread] writing index → {index_path}", flush=True)
 
@@ -132,8 +153,10 @@ def build_index(
     zero_preamble = b"\x00" * 16
 
     with open(index_path, "wb") as out:
-        out.write(INDEX_MAGIC)
-        out.write(struct.pack("<QQQQ", tib_size, data_start, data_end, partition_block_count))
+        out.write(INDEX_MAGIC)  # TIBIDX02 — modern, fixed geometry
+        out.write(
+            struct.pack("<QQQQ", tib_size, data_start, data_end, partition_block_count)
+        )
         for pb, (off, ln) in enumerate(records):
             if ln > 0:
                 out.write(
@@ -146,6 +169,112 @@ def build_index(
                 )
             else:
                 out.write(struct.pack("<Q16sI", 0, zero_preamble, 0))
+
+    if progress:
+        print(
+            f"[tibread] done. index size: "
+            f"{index_path.stat().st_size / 1024 / 1024:.1f} MB",
+            flush=True,
+        )
+    return index_path
+
+
+def _build_index_legacy(tib_path: Path, index_path: Path, *, progress: bool) -> Path:
+    # Legacy: walk the block stream forward to discover all inline
+    # SequentialChunkMap records, decode them, then collect each stored
+    # block's preamble (smaller, e.g. 8 bytes for TI 2014).
+    if progress:
+        print(
+            f"[tibread] walking legacy block stream to find inline chunk maps...",
+            flush=True,
+        )
+    md_offsets, clusters_per_block, preamble_len = discover_inline_chunkmaps_legacy(
+        str(tib_path), progress=progress
+    )
+    if progress:
+        print(
+            f"[tibread]   {len(md_offsets)} inline chunkmap record(s) at: "
+            + ", ".join(f"{o:,}" for o in md_offsets),
+            flush=True,
+        )
+        print(
+            f"[tibread]   geometry: clusters_per_block={clusters_per_block} "
+            f"preamble_len={preamble_len}",
+            flush=True,
+        )
+
+    if progress:
+        print(f"[tibread] decoding inline chunk maps...", flush=True)
+    records, partition_block_count = decode_chunkmap_legacy_from_md_offsets(
+        str(tib_path), md_offsets
+    )
+    n_stored = sum(1 for off, ln in records if ln > 0)
+    n_sparse = partition_block_count - n_stored
+    if progress:
+        print(
+            f"[tibread]   {partition_block_count:,} partition_blocks "
+            f"({n_stored:,} stored, {n_sparse:,} sparse)",
+            flush=True,
+        )
+
+    # The decoded records' "concat_offset" is relative to data_start = 32.
+    # Each record's `length` is the on-disk SIZE of the block in the .tib
+    # (preamble_len bytes of bitmap + zlib stream), so the file offset of
+    # block `pb` is VOLUME_HEADER_LEN + concat_offset.
+    if progress:
+        print(
+            f"[tibread] reading {n_stored:,} preambles "
+            f"(sequential file order)...",
+            flush=True,
+        )
+    stored = [
+        (pb, off + VOLUME_HEADER_LEN, ln)
+        for pb, (off, ln) in enumerate(records)
+        if ln > 0
+    ]
+    stored.sort(key=lambda x: x[1])
+
+    preambles: dict[int, bytes] = {}
+    tib_size = tib_path.stat().st_size
+    with open(tib_path, "rb") as f:
+        last_pct = -1
+        for i, (pb, foff, _ln) in enumerate(stored):
+            if progress and n_stored:
+                pct = (i * 100) // n_stored
+                if pct != last_pct and pct % 5 == 0:
+                    print(f"[tibread]   {pct}%", flush=True)
+                    last_pct = pct
+            f.seek(foff)
+            preambles[pb] = f.read(preamble_len)
+
+    if progress:
+        print(f"[tibread] writing index → {index_path}", flush=True)
+
+    data_start = VOLUME_HEADER_LEN
+    # data_end = file offset of the LAST inline chunkmap record (i.e. the
+    # terminal one, which sits right at the end of the block stream).
+    data_end = md_offsets[-1] if md_offsets else tib_size
+    zero_preamble = b"\x00" * preamble_len
+    rec_fmt = f"<Q{preamble_len}sI"
+
+    with open(index_path, "wb") as out:
+        out.write(INDEX_MAGIC_V3)  # TIBIDX03 — geometry-explicit
+        out.write(
+            struct.pack("<QQQQ", tib_size, data_start, data_end, partition_block_count)
+        )
+        out.write(struct.pack("<IIQ", clusters_per_block, preamble_len, 0))
+        for pb, (off, ln) in enumerate(records):
+            if ln > 0:
+                out.write(
+                    struct.pack(
+                        rec_fmt,
+                        off + VOLUME_HEADER_LEN,
+                        preambles[pb],
+                        ln,
+                    )
+                )
+            else:
+                out.write(struct.pack(rec_fmt, 0, zero_preamble, 0))
 
     if progress:
         print(

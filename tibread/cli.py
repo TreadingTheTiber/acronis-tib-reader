@@ -26,23 +26,32 @@ from .indexer import build_index, open_tib, _default_index_path
 
 
 def cmd_info(args):
-    from .chunkmap_locator import discover_chunkmap_offset
+    from .chunkmap_locator import discover_chunkmap_offset, detect_format_era
     from .verify import compute_header_adler32
 
     tib = Path(args.tib)
-    # Validate the file is a sector-mode .tib BEFORE printing any info,
-    # so failures don't leave a half-printed banner above the error.
-    chunkmap_off, chunkmap_size = discover_chunkmap_offset(str(tib))
     print(f"tib file: {tib}  ({tib.stat().st_size:,} bytes)")
-    print(f"  chunk-map: offset={chunkmap_off:,}  comp_size={chunkmap_size:,}")
+    era = detect_format_era(str(tib))
+    print(f"  format era: {era}")
+    if era == "modern":
+        chunkmap_off, chunkmap_size = discover_chunkmap_offset(str(tib))
+        print(f"  chunk-map: offset={chunkmap_off:,}  comp_size={chunkmap_size:,}")
+    else:
+        print(f"  chunk-map: inline (multiple SequentialChunkMap records "
+              f"interleaved with the block stream)")
     ok, stored, computed = compute_header_adler32(str(tib))
     print(f"  header Adler32: stored={stored:08X} computed={computed:08X} {'OK' if ok else 'MISMATCH'}")
 
     # Build (or load) index, then show partition stats
     idx_path = build_index(tib, progress=args.verbose)
     r = TibReader(str(tib), str(idx_path), cache_blocks=4)
-    print(f"  partition_size: {r.partition_size:,} bytes ({r.partition_size / 1024**4:.2f} TiB)")
+    if r.partition_size >= 1024 ** 4:
+        size_str = f"{r.partition_size / 1024**4:.2f} TiB"
+    else:
+        size_str = f"{r.partition_size / 1024**3:.2f} GiB"
+    print(f"  partition_size: {r.partition_size:,} bytes ({size_str})")
     print(f"  block_count: {r.block_count:,}")
+    print(f"  geometry: clusters_per_block={r.clusters_per_block}, preamble_len={r.preamble_len}")
     print(f"  index file: {idx_path}")
 
     # Quick NTFS probe
