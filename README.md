@@ -1,11 +1,27 @@
 # tibread
 
+**Status:** `tibread 0.1.0` — works end-to-end on Acronis True Image
+2013–2018+ sector-mode `.tib` files. See [CHANGELOG.md](CHANGELOG.md) for
+the full feature matrix.
+
 **Pure-Python read-only access to Acronis True Image `.tib` backups.**
 Mount, list, and extract files from `.tib` files without Acronis software.
 
 This was originally built to recover a 1 TB backup from a long-discontinued
 Acronis True Image installation. It now supports any sector-mode `.tib`
 self-describingly — no per-file constants, no manual offset hunting.
+
+### Benchmarks
+
+| File | Size | Era | First-open (cold, builds index) | Re-open (cached) | Recovery rate |
+|---|---|---|---|---|---|
+| `example_full_b1_s1_v1.tib` | 1.04 TiB | TI v23.5 (modern) | ~3 min (chunk-map decode + NTFS index) | <10 s incl. NTFS load | ~99% (200,000+ files vs. source XML metainfo) |
+| `legacy_example.tib` | 8.18 GiB | TI 2013 (legacy) | ~4 min (sequential inline-chunk-map scan) | <1 s | 100% (NTFS file-count parity) |
+
+The "remaining 1%" on `STORAGE` is genuine source-data damage (Recycle-Bin
+entries with deallocated source clusters, old QuickTime `.mov` files with
+non-`ftyp` headers), not reader bugs. See `docs/RE_HISTORY.md` for the
+full validation account.
 
 ## Features
 
@@ -28,14 +44,27 @@ self-describingly — no per-file constants, no manual offset hunting.
 ## Installation
 
 ```bash
-pip install .                  # core
-pip install '.[fuse]'          # + Linux FUSE mount support
-pip install '.[winfsp]'        # + Windows WinFsp mount support
-pip install '.[fast]'          # + numpy for ~5× faster index builds
+git clone https://github.com/yourname/tibread.git
+cd tibread
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .                  # core, exposes the `tib` command
+pip install -e '.[fuse]'          # + Linux FUSE mount support
+pip install -e '.[winfsp]'        # + Windows WinFsp mount support
+pip install -e '.[fast]'          # + numpy for ~5× faster index builds
+```
+
+Verify the install:
+
+```bash
+tib --version          # -> tibread 0.1.0
+tib info /path/to/backup_full_b1_s1_v1.tib
 ```
 
 System packages required for the FUSE mount on Linux:
 - `libfuse2` and the `fusermount` / `fusermount3` binary
+
+`tibread` requires Python 3.9+ and has no mandatory third-party dependencies.
 
 ## Quickstart
 
@@ -105,11 +134,10 @@ data = vol.read_file("Users/alice/Documents/x.docx")
 | Encrypted `.tib` | ⚠️ Spec written, decoder skeleton only | AES-CBC + PBKDF2/SHA-stretch/scrypt; needs a sample to finish |
 | Multi-volume splits (`_v1.tib`, `_v2.tib`, …) | ⚠️ Detection only | Open the *last* volume to access metadata |
 | Incremental / differential chains | ⚠️ Spec written, not implemented | Needs sidecar `mms.db` (catalog) for chain reconstruction |
-| NTFS `LZNT1`-compressed files | ⚠️ Decompressor available (`tibread.lznt1`); not yet wired into `NtfsVolume` | |
-| WOF / Compact OS Xpress-compressed files | ⚠️ Decompressor available (`tibread.xpress`); not yet wired into `NtfsVolume` | |
+| NTFS `LZNT1`-compressed files | ✅ Supported | Decompressed transparently on read via `tibread.lznt1`; 64 KB compression units cached LRU. |
+| WOF / Compact OS Xpress-compressed files | ✅ Supported (Xpress 4K / 8K / 16K) | Detected via `IO_REPARSE_TAG_WOF` (0x80000017); reads of the (sparse) unnamed `$DATA` are rerouted to `:WofCompressedData` and decompressed via `tibread.xpress`. **WOF / LZX (algorithm 1) is not implemented** (rare; falls back to zeros). |
 
-The "not yet wired" items each have a working pure-Python decompressor in the
-package and a documented integration plan; pull requests welcome.
+Pull requests welcome for the remaining ⚠️ items above.
 
 ## How it works
 
@@ -162,14 +190,27 @@ docs/                       Format specs and RE notes
 └── legacy/                 Per-investigation RE notes for the legacy format
 ```
 
+## Tested on
+
+The following `.tib` files have been confirmed working end-to-end on this
+release. If your file matches one of these eras, it should Just Work; if
+not, please open an issue with `tib info <file>` output.
+
+| File | Size | Source TI version | Format era | Result |
+|---|---|---|---|---|
+| `example_full_b1_s1_v1.tib` | 1.04 TiB | True Image v23.5 build 17750 (2018+) | modern (16-byte preamble, 128-cluster blocks) | Mount + extract OK; ~99% file-count parity vs. source XML metainfo (200,000+ files) |
+| `legacy_example.tib` | 8.18 GiB | True Image 2013 | legacy (8-byte preamble, 64-cluster blocks, inline chunk-map records) | Mount + extract OK; 100% file-count parity |
+
 ## Status
 
 This is a 0.1 release. It works end-to-end for the original 1 TB recovery
-that motivated it (99.5% file recovery vs. the source XML metainfo's count;
+that motivated it (~99% file recovery vs. the source XML metainfo's count;
 remaining failures are Recycle-Bin entries with deallocated source clusters
 and old QuickTime `.mov` files with non-`ftyp` headers — both genuine, not
-reader bugs). It almost certainly contains rough edges on other people's
-`.tib` files. Bug reports very welcome.
+reader bugs) plus a TI 2013 legacy backup at 100% parity. It almost
+certainly contains rough edges on other people's `.tib` files. Bug reports
+very welcome — see `CHANGELOG.md` for the precise scope of supported and
+unsupported variants.
 
 ## Acknowledgments
 
