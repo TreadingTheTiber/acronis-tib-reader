@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tibread"
+version = "0.1.0"
+description = "Pure-Python read-only access to Acronis True Image .tib backups."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "tibread contributors" },
+]
+requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: System :: Archiving :: Backup",
+    "Topic :: System :: Filesystems",
+]
+dependencies = [
+    # numpy is a fast path for the chunk-map decoder; the package falls back
+    # to pure-Python if it's not present.
+]
+
+[project.optional-dependencies]
+fuse = ["fusepy>=3.0"]
+winfsp = ["winfspy>=0.8"]
+fast = ["numpy>=1.20"]
+
+[project.scripts]
+tib = "tibread.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/yourname/tibread"
+Issues = "https://github.com/yourname/tibread/issues"
+
+[tool.setuptools.packages.find]
+include = ["tibread*"]
