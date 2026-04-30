@@ -9,10 +9,13 @@ self-describingly — no per-file constants, no manual offset hunting.
 
 ## Features
 
-- **Read sector-mode `.tib` backups** (the most common kind: full-disk image backups).
-- **Self-describing** — works on any sector-mode `.tib` of the v23.x format generation
-  with no hardcoded offsets or sizes. The chunk-map locator is parsed from
-  the backup's own metadata blob.
+- **Read sector-mode `.tib` backups** — the common full-disk image format,
+  both the modern variant (TI 2018+, 16-byte preamble + 128-cluster blocks)
+  and the legacy variant (TI 2014/2015/2016, 8-byte preamble + 64-cluster
+  blocks).
+- **Self-describing** — no hardcoded offsets or sizes. The format era is
+  detected from the backup's own metadata blob (TLV tag `0x9b` presence
+  test), and the chunk map is decoded from there.
 - **Pure Python** — no Acronis libraries, no compiled extensions, no dependencies
   on `ntfs-3g`. Optional `numpy` makes index-building faster.
 - **NTFS filesystem reader built in** — list, stat, and read files directly
@@ -92,8 +95,9 @@ data = vol.read_file("Users/alice/Documents/x.docx")
 
 | Format | Status | Notes |
 |---|---|---|
-| Sector-mode `.tib`, modern (TI 2018+, 16-byte preamble + 128-cluster blocks) | ✅ Supported | The common full-disk backup format from Acronis True Image 2018-2019 |
-| Sector-mode `.tib`, legacy (TI 2014/2015/2016, 8-byte preamble + 64-cluster blocks) | ✅ Supported | Recognised by absence of TLV tag `0x9b` in the metadata blob; chunk map is split across inline `SequentialChunkMap` records interleaved with the block stream. See `docs/FORMAT_LEGACY.md`. |
+| Sector-mode `.tib`, modern (TI 2018+, 16-byte preamble + 128-cluster blocks) | ✅ Supported | The common full-disk backup format from Acronis True Image 2018-2019. See `docs/FORMAT.md`. |
+| Sector-mode `.tib`, legacy (TI 2014/2015/2016, 8-byte preamble + 64-cluster blocks) | ✅ Supported | Recognised by absence of TLV tag `0x9b` in the metadata blob; chunk map is split across inline `SequentialChunkMap` records interleaved with the block stream. **First open is slow** (sequential scan to find the inline chunk maps — ~4 minutes for 8 GB; subsequent opens are instant via the cached `.idx` sidecar). See `docs/FORMAT_LEGACY.md`. |
+| Sector-mode `.tib`, very-legacy (TI 2010-2013, `version=1` + `sector_size=0x1000`) | ❌ Rejected with a clean error | Acronis True Image 2018+ reads these only by destructively migrating them in-place to the modern format. To read with `tibread`: open once in TI 2018+ to migrate, then re-run. See `docs/FORMAT_VERY_LEGACY.md`. |
 | `.tibx` (TIB eXtended, "QARCH" archive) | ❌ Different format, not supported | Acronis True Image 2020+ replaced `.tib` with `.tibx`, which uses an SQLite-backed archive container instead of the layout this reader handles. **If your file is `.tibx`, use a different tool.** |
 | Filesystem-mode v1 `.tib` (magic `0x8F5C36C6`) | ⚠️ Format spec'd, not yet implemented | See `docs/FORMAT.md` |
 | Filesystem-mode v2 `.tib` (magic `0x44686EB4`) | ⚠️ Format spec'd, not yet implemented | See `docs/FORMAT.md` |
@@ -110,10 +114,9 @@ package and a documented integration plan; pull requests welcome.
 ## How it works
 
 A sector-mode `.tib` is a 32-byte volume header, then a long block stream
-(each block = 16-byte cluster-presence bitmap + zlib-compressed cluster
-data), then a post-data region containing several zlib-compressed metadata
-streams plus an MD5 manifest and a cuckoo dedup filter, then a 780-byte TLV
-metadata blob, then a 41-byte sector trailer.
+(each block = cluster-presence bitmap + zlib-compressed cluster data), then
+a trailing region containing per-block dedup metadata, a TLV metadata blob,
+and a sector trailer with `sliceSize64` + magic `0x94E18A2B`.
 
 The critical reverse-engineered piece is the **on-disk chunk map**: a
 zlib-compressed table that maps every partition block of the source volume
@@ -121,31 +124,42 @@ to its byte offset in the `.tib`. Acronis encodes it as 12-byte records
 {u64 zigzag-delta-offset, u32 length}, with a column-major byte transpose
 applied before zlib compression for better ratio.
 
-`tibread` decodes the chunk map (`tibread.chunkmap`), then builds a
+The modern (TI 2018+) and legacy (TI 2014/2015/2016) variants share this
+chunk-map encoding but differ in where it lives: modern stores it in a
+single dedicated post-data region pointed to by a 13-byte locator in the
+metadata blob (TLV tag `0x9b`); legacy splits it into inline records
+interleaved with the block stream.
+
+`tibread` detects the variant via the metadata blob, decodes the chunk map
+(`tibread.chunkmap` / `tibread.chunkmap_legacy`), then builds a
 "partition-direct" index keyed by partition_block (`tibread.indexer`) that
 makes random-access reads O(1). The included NTFS reader (`tibread.ntfs`)
 then walks the source volume's MFT exactly as the source OS would.
 
-For full RE history and the format specification, see `docs/FORMAT.md`.
+For full RE history see `docs/RE_HISTORY.md`. For format specs see
+`docs/FORMAT.md` (modern), `docs/FORMAT_LEGACY.md` (legacy), and
+`docs/FORMAT_VERY_LEGACY.md` (TI 2010-2013, rejected).
 
 ## Project layout
 
 ```
 tibread/                    Python package (importable + CLI)
-├── reader.py               Low-level block reader (TibReader)
-├── chunkmap_locator.py     Self-describing chunk-map offset/size discovery
-├── chunkmap.py             Chunk-map zlib + transpose + zigzag-delta decoder
-├── indexer.py              build_index(): one call from .tib to ready-to-read
+├── reader.py               Low-level block reader (TibReader, TIBIDX02/03 indices)
+├── chunkmap_locator.py     Self-describing chunk-map discovery + format-era detection
+├── chunkmap.py             Modern chunk-map decoder (zlib + transpose + zigzag-delta)
+├── chunkmap_legacy.py      Legacy inline-SequentialChunkMap discovery + decode
+├── indexer.py              build_index(): dispatches modern vs legacy
 ├── ntfs.py                 Pure-Python NTFS reader (NtfsVolume)
 ├── lznt1.py                LZNT1 decompressor (NTFS attribute compression)
 ├── xpress.py               Xpress LZ77+Huffman decompressor (WOF / Compact OS)
-├── verify.py               Volume-header Adler32 validator
-├── metadata.py             780-byte metadata-blob TLV parser
+├── verify.py               Volume-header Adler32 validator + format-magic dispatch
+├── metadata.py             Metadata-blob TLV parser
 ├── mount/fuse.py           FUSE mount (Linux)
 └── cli.py                  `tib` command entry point
 
 tools/                      Standalone scripts (helper / advanced use)
 docs/                       Format specs and RE notes
+└── legacy/                 Per-investigation RE notes for the legacy format
 ```
 
 ## Status

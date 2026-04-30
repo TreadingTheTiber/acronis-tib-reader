@@ -30,6 +30,11 @@ def cmd_info(args):
     from .verify import compute_header_adler32
 
     tib = Path(args.tib)
+    # Validate format up-front so unsupported variants (.tibx, fs-mode,
+    # very-legacy) fail with a clean single-line error instead of partial
+    # output. compute_header_adler32 raises UnsupportedTibFormat on .tibx
+    # and unknown magics; detect_format_era covers very-legacy.
+    compute_header_adler32(str(tib))
     print(f"tib file: {tib}  ({tib.stat().st_size:,} bytes)")
     era = detect_format_era(str(tib))
     print(f"  format era: {era}")
