@@ -14,20 +14,32 @@ flat NTFS partition image. Supports:
     - File reads (resident or non-resident, sparse-aware)
 
 Limitations:
-    - No NTFS compression (compressed attrs are skipped)
-    - No EFS encryption
+    - No EFS encryption (encrypted attrs are skipped)
     - No $ATTRIBUTE_LIST chasing (records that overflow into other MFT
       records will be incomplete; rare for normal user files but happens
       for very fragmented files / huge directories)
     - Case-insensitive matching is ASCII-folded only (no upcase table)
+
+Compression support:
+    - NTFS attribute compression (LZNT1) is decompressed transparently via
+      `tibread.lznt1`. Compression units (typically 16 clusters / 64 KB)
+      are decoded on demand and cached LRU.
+    - WOF / Compact-OS Xpress-compressed files (reparse tag 0x80000017,
+      providers Xpress4K / Xpress8K / Xpress16K) are decompressed via
+      `tibread.xpress`. Reads on the (sparse) unnamed $DATA are rerouted
+      to the named `:WofCompressedData` ADS. WOF/LZX is not supported.
 """
 from __future__ import annotations
 
 import os
 import struct
 import sys
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Optional
+
+from .lznt1 import lznt1_decompress
+from . import xpress as _xpress
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -45,7 +57,22 @@ AT_DATA                 = 0x80
 AT_INDEX_ROOT           = 0x90
 AT_INDEX_ALLOCATION     = 0xA0
 AT_BITMAP               = 0xB0
+AT_REPARSE_POINT        = 0xC0
 AT_END                  = 0xFFFFFFFF
+
+# Reparse-point tags (Microsoft-defined)
+IO_REPARSE_TAG_WOF = 0x80000017  # Windows Overlay Filter / Compact OS
+
+# WOF FILE_PROVIDER algorithm enum (per ntifs.h)
+WOF_FILE_PROVIDER_COMPRESSION_XPRESS4K  = 0
+WOF_FILE_PROVIDER_COMPRESSION_LZX       = 1
+WOF_FILE_PROVIDER_COMPRESSION_XPRESS8K  = 2
+WOF_FILE_PROVIDER_COMPRESSION_XPRESS16K = 3
+_WOF_XPRESS_CHUNK_SIZE = {
+    WOF_FILE_PROVIDER_COMPRESSION_XPRESS4K:  4096,
+    WOF_FILE_PROVIDER_COMPRESSION_XPRESS8K:  8192,
+    WOF_FILE_PROVIDER_COMPRESSION_XPRESS16K: 16384,
+}
 
 # MFT record flags
 MFT_FLAG_IN_USE     = 0x01
@@ -121,6 +148,9 @@ class _ParsedAttr:
     real_size: int = 0
     init_size: int = 0
     runs: list = field(default_factory=list)  # list of (vcn_count, lcn_or_None)
+    # Compression: log2 of CU size in clusters (typ. 4 = 16 clusters = 64 KB).
+    # 0 means uncompressed.
+    compression_unit_size: int = 0
 
 
 @dataclass
@@ -147,6 +177,12 @@ class _MftRecord:
     fn_attrs: int = 0
     # All filenames (parent_ref, namespace, name) for parent linking
     file_names: list = field(default_factory=list)
+    # WOF / Compact OS reparse info (set if the record has IO_REPARSE_TAG_WOF
+    # with a supported Xpress provider). When set, `read_file` reroutes to the
+    # named :WofCompressedData $DATA attribute and decompresses on the fly.
+    wof_uncompressed_size: int = 0
+    wof_chunk_size: int = 0   # 4096 / 8192 / 16384; 0 = not WOF / unsupported
+    wof_algorithm: int = -1
 
 
 # ---------------------------------------------------------------------------
@@ -714,6 +750,201 @@ class NtfsVolume:
             out.extend(b"\x00" * remaining)
         return bytes(out)
 
+    # ----- compressed (LZNT1) attribute read -------------------------------
+
+    _CU_CACHE_MAX = 32
+
+    def _cu_cache_get(self, key):
+        cache = getattr(self, "_cu_cache", None)
+        if cache is None:
+            return None
+        v = cache.get(key)
+        if v is not None:
+            cache.move_to_end(key)
+        return v
+
+    def _cu_cache_put(self, key, value):
+        cache = getattr(self, "_cu_cache", None)
+        if cache is None:
+            cache = OrderedDict()
+            self._cu_cache = cache
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > self._CU_CACHE_MAX:
+            cache.popitem(last=False)
+
+    def _decompress_cu(self, attr, cu_index: int, cu_size_bytes: int,
+                       cu_size_clusters: int) -> bytes:
+        """Materialize one compression unit (CU) of a compressed attr as a
+        bytes object of length `cu_size_bytes` (typically 64 KB)."""
+        # Walk attr.runs in VCN-space, picking out the CU's vcn slice
+        cu_vcn_start = cu_index * cu_size_clusters
+        cu_vcn_end = cu_vcn_start + cu_size_clusters
+        cs = self.cluster_size
+
+        # Slice the runs covering this CU; classify (a) all sparse, (b) full
+        # stored, or (c) partial stored + sparse fill (compressed).
+        stored_clusters = 0
+        sparse_clusters = 0
+        cur_vcn = 0
+        cu_runs: list = []  # list of (length_in_clusters, lcn_or_None) limited to CU
+        for run_len, lcn in attr.runs:
+            run_start = cur_vcn
+            run_end = cur_vcn + run_len
+            cur_vcn = run_end
+            if run_end <= cu_vcn_start:
+                continue
+            if run_start >= cu_vcn_end:
+                break
+            seg_start = max(run_start, cu_vcn_start)
+            seg_end = min(run_end, cu_vcn_end)
+            seg_len = seg_end - seg_start
+            if seg_len <= 0:
+                continue
+            if lcn is None:
+                cu_runs.append((seg_len, None))
+                sparse_clusters += seg_len
+            else:
+                # Compute the LCN at seg_start within this run
+                seg_lcn = lcn + (seg_start - run_start)
+                cu_runs.append((seg_len, seg_lcn))
+                stored_clusters += seg_len
+
+        if stored_clusters == 0:
+            # All-sparse CU
+            return b"\x00" * cu_size_bytes
+
+        # Read all stored clusters in their original order to form the raw
+        # CU image (for non-compressed CU) or the LZNT1 payload.
+        # Stored runs come before sparse fill in a compressed CU; the read
+        # below preserves run order so we get the LZNT1 stream contiguously.
+        raw = bytearray()
+        for seg_len, seg_lcn in cu_runs:
+            if seg_lcn is None:
+                # In a compressed CU the trailing sparse clusters are NOT part
+                # of the LZNT1 stream — they're just padding. Don't include.
+                continue
+            raw.extend(self._read_clusters(seg_lcn, seg_len))
+
+        if stored_clusters == cu_size_clusters and sparse_clusters == 0:
+            # Uncompressed CU, stored verbatim
+            return bytes(raw)
+
+        # Compressed CU — run LZNT1 on the stored bytes, pad to CU size
+        return lznt1_decompress(bytes(raw), expected_size=cu_size_bytes)
+
+    def _read_clusters(self, lcn: int, n_clusters: int) -> bytes:
+        """Read n_clusters starting at `lcn`, applying the same shift logic
+        as `_read_via_runs` for non-MFT data."""
+        cs = self.cluster_size
+        if self._lcn_shift_map:
+            out = bytearray()
+            for k in range(n_clusters):
+                orig = lcn + k
+                shift = self._shift_for_lcn(orig)
+                reader_lcn = orig + shift
+                if reader_lcn < 0:
+                    out.extend(b"\x00" * cs)
+                else:
+                    out.extend(self.disk.read(reader_lcn * cs, cs))
+            return bytes(out)
+        bpb_mft = getattr(self, '_bpb_mft_lcn', None)
+        shift = self.lcn_shift
+        if bpb_mft is None or shift == 0:
+            return self.disk.read(lcn * cs, n_clusters * cs)
+        # Apply the same gap logic as _read_via_runs for non-MFT data
+        out = bytearray()
+        for k in range(n_clusters):
+            orig = lcn + k
+            if orig >= bpb_mft:
+                reader_lcn = orig + shift
+                out.extend(self.disk.read(reader_lcn * cs, cs))
+            elif orig >= bpb_mft + shift:
+                out.extend(b"\x00" * cs)
+            else:
+                out.extend(self.disk.read(orig * cs, cs))
+        return bytes(out)
+
+    def _read_compressed_attr(self, attr: _ParsedAttr, offset: int, length: int,
+                              cache_key_prefix=()) -> bytes:
+        """Read `length` bytes from `offset` of an LZNT1-compressed non-resident
+        attribute. The attribute's $DATA real_size is the *uncompressed* file
+        size; CUs of `2 ** attr.compression_unit_size` clusters each are
+        decoded on demand via `lznt1_decompress` and cached LRU."""
+        cu_clusters = 1 << attr.compression_unit_size
+        cu_bytes = cu_clusters * self.cluster_size
+        real_size = attr.real_size
+        init_size = attr.init_size
+        if length <= 0 or offset >= real_size:
+            return b""
+        end = min(offset + length, real_size)
+        out = bytearray()
+        cu_idx = offset // cu_bytes
+        cu_off = offset % cu_bytes
+        while len(out) < end - offset:
+            need = (end - offset) - len(out)
+            # Anything past init_size is logically zero
+            absolute = offset + len(out)
+            if absolute >= init_size:
+                out.extend(b"\x00" * need)
+                break
+            cu_remaining = cu_bytes - cu_off
+            take = min(need, cu_remaining)
+            # Cache per (id(attr), cu_idx). id is fine — _MftRecord lives in cache.
+            ck = cache_key_prefix + (id(attr), cu_idx)
+            cu_data = self._cu_cache_get(ck)
+            if cu_data is None:
+                cu_data = self._decompress_cu(attr, cu_idx, cu_bytes, cu_clusters)
+                self._cu_cache_put(ck, cu_data)
+            slice_end = cu_off + take
+            chunk = cu_data[cu_off:slice_end]
+            # Honour init_size cutoff inside this CU
+            cu_abs_start = cu_idx * cu_bytes
+            if init_size < cu_abs_start + slice_end:
+                cutoff = max(0, init_size - (cu_abs_start + cu_off))
+                if cutoff < len(chunk):
+                    chunk = chunk[:cutoff] + b"\x00" * (len(chunk) - cutoff)
+            out.extend(chunk)
+            cu_idx += 1
+            cu_off = 0
+        return bytes(out)
+
+    # ----- WOF (Xpress) attribute read -------------------------------------
+
+    def _read_wof(self, rec: _MftRecord, offset: int, length: int) -> bytes:
+        """Read from a WOF-compressed file by decompressing the named
+        :WofCompressedData $DATA stream."""
+        size = rec.wof_uncompressed_size
+        if length < 0:
+            length = size - offset
+        if offset >= size or length <= 0:
+            return b""
+        length = min(length, size - offset)
+
+        # Cached decompressed payload? WOF files tend to be read whole; one
+        # decompression per file is fine. Re-use the same LRU as CUs.
+        ck = ("wof", rec.rec_num)
+        plain = self._cu_cache_get(ck)
+        if plain is None:
+            wof_attr = None
+            for a in rec.attrs:
+                if a.type == AT_DATA and a.name == "WofCompressedData":
+                    wof_attr = a
+                    break
+            if wof_attr is None:
+                # No payload — return zeros (file appears empty)
+                return b"\x00" * length
+            if wof_attr.non_resident:
+                payload = self._read_via_runs(wof_attr.runs, 0, wof_attr.real_size)
+            else:
+                payload = wof_attr.content
+            try:
+                plain = _xpress.decompress(payload, size, chunk_size=rec.wof_chunk_size)
+            except _xpress.XpressError:
+                return b"\x00" * length
+            self._cu_cache_put(ck, plain)
+        return plain[offset:offset + length]
+
     def _get_mft_record(self, rec_num: int) -> Optional[_MftRecord]:
         cached = self._mft_cache.get(rec_num)
         if cached is not None:
@@ -785,8 +1016,10 @@ class NtfsVolume:
             name_off = struct.unpack_from("<H", fixed, pos + 10)[0]
             attr_flags = struct.unpack_from("<H", fixed, pos + 12)[0]
 
-            # Skip compressed/encrypted attrs (we don't support them)
-            if attr_flags & (ATTR_FLAG_COMPRESSED | ATTR_FLAG_ENCRYPTED):
+            # Skip encrypted attrs (EFS not supported). Compressed attrs are
+            # handled below — they go into rec.attrs and decompression is
+            # applied in the read path.
+            if attr_flags & ATTR_FLAG_ENCRYPTED:
                 pos += attr_len
                 continue
 
@@ -809,7 +1042,9 @@ class NtfsVolume:
                 first_vcn = struct.unpack_from("<Q", fixed, pos + 16)[0]
                 last_vcn = struct.unpack_from("<Q", fixed, pos + 24)[0]
                 run_off = struct.unpack_from("<H", fixed, pos + 32)[0]
-                # comp_unit = struct.unpack_from("<H", fixed, pos + 34)[0]
+                # Compression unit size (log2 clusters). Only meaningful when
+                # ATTR_FLAG_COMPRESSED is set; 0 otherwise.
+                comp_unit = struct.unpack_from("<H", fixed, pos + 34)[0]
                 alloc_size = struct.unpack_from("<Q", fixed, pos + 40)[0]
                 real_size = struct.unpack_from("<Q", fixed, pos + 48)[0]
                 init_size = struct.unpack_from("<Q", fixed, pos + 56)[0]
@@ -818,6 +1053,8 @@ class NtfsVolume:
                 pa.alloc_size = alloc_size
                 pa.real_size = real_size
                 pa.init_size = init_size
+                if attr_flags & ATTR_FLAG_COMPRESSED:
+                    pa.compression_unit_size = comp_unit if comp_unit else 4
                 if run_off < attr_len:
                     pa.runs = _decode_runs(fixed[pos:pos + attr_len], run_off)
 
@@ -835,8 +1072,18 @@ class NtfsVolume:
                 fn = self._parse_file_name(pa.content)
                 if fn is not None:
                     rec.file_names.append(fn)
+            elif attr_type == AT_REPARSE_POINT and not non_resident:
+                self._maybe_parse_wof(rec, pa.content)
 
             pos += attr_len
+
+        # If WOF was detected, record the uncompressed size from the unnamed
+        # $DATA (which is a sparse placeholder of exactly that length).
+        if rec.wof_chunk_size:
+            for a in rec.attrs:
+                if a.type == AT_DATA and a.name == "":
+                    rec.wof_uncompressed_size = a.real_size if a.non_resident else len(a.content)
+                    break
 
         # Pick best name
         if rec.file_names:
@@ -852,6 +1099,45 @@ class NtfsVolume:
             rec.fn_attrs = best["attrs"]
 
         return rec
+
+    @staticmethod
+    def _maybe_parse_wof(rec: _MftRecord, content: bytes) -> None:
+        """If `content` is a $REPARSE_POINT body for IO_REPARSE_TAG_WOF with
+        a supported Xpress provider, populate rec.wof_* fields."""
+        if len(content) < 8:
+            return
+        tag = struct.unpack_from("<I", content, 0)[0]
+        if tag != IO_REPARSE_TAG_WOF:
+            return
+        data_len = struct.unpack_from("<H", content, 4)[0]
+        # 8-byte reparse header, then GenericReparseBuffer of `data_len`.
+        # WOF body layout:
+        #   WOF_EXTERNAL_INFO          { u32 Version=1; u32 Provider=2 }   (8 bytes)
+        #   FILE_PROVIDER_EXTERNAL_INFO_V1 {
+        #       u32 Version=1; u32 Algorithm; u32 Flags                    (12 bytes)
+        #   }
+        # Total = 20 bytes (some buffers also include trailing padding).
+        if 8 + data_len > len(content) or data_len < 16:
+            return
+        body = content[8:8 + data_len]
+        wof_ver = struct.unpack_from("<I", body, 0)[0]
+        provider = struct.unpack_from("<I", body, 4)[0]
+        if wof_ver != 1 or provider != 2:  # only FILE_PROVIDER supported
+            return
+        prov_ver = struct.unpack_from("<I", body, 8)[0]
+        algorithm = struct.unpack_from("<I", body, 12)[0]
+        if prov_ver != 1:
+            return
+        chunk = _WOF_XPRESS_CHUNK_SIZE.get(algorithm)
+        if chunk is None:
+            # LZX (1) or unknown — leave wof_chunk_size = 0 so reads fall back.
+            rec.wof_algorithm = algorithm
+            return
+        rec.wof_algorithm = algorithm
+        rec.wof_chunk_size = chunk
+        # Uncompressed size is recorded in the unnamed $DATA's real_size
+        # (it's a sparse stream of that length). Filled in by the caller from
+        # the parsed attrs after the loop completes.
 
     @staticmethod
     def _parse_file_name(content: bytes) -> Optional[dict]:
@@ -1053,6 +1339,11 @@ class NtfsVolume:
         if rec.is_dir:
             raise IsADirectoryError(path)
 
+        # WOF / Compact OS Xpress: the unnamed $DATA is a sparse placeholder;
+        # the real bytes live in :WofCompressedData. Decompress and slice.
+        if rec.wof_chunk_size:
+            return self._read_wof(rec, offset, length)
+
         data_attr = None
         for a in rec.attrs:
             if a.type == AT_DATA and a.name == "":
@@ -1075,6 +1366,10 @@ class NtfsVolume:
         if offset >= real_size or length <= 0:
             return b""
         length = min(length, real_size - offset)
+
+        # NTFS attribute compression (LZNT1)
+        if data_attr.flags & ATTR_FLAG_COMPRESSED and data_attr.compression_unit_size:
+            return self._read_compressed_attr(data_attr, offset, length)
 
         # Initialized data ends at init_size; bytes past that read as zero.
         init_size = data_attr.init_size
