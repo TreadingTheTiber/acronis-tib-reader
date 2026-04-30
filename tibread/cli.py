@@ -30,8 +30,10 @@ def cmd_info(args):
     from .verify import compute_header_adler32
 
     tib = Path(args.tib)
-    print(f"tib file: {tib}  ({tib.stat().st_size:,} bytes)")
+    # Validate the file is a sector-mode .tib BEFORE printing any info,
+    # so failures don't leave a half-printed banner above the error.
     chunkmap_off, chunkmap_size = discover_chunkmap_offset(str(tib))
+    print(f"tib file: {tib}  ({tib.stat().st_size:,} bytes)")
     print(f"  chunk-map: offset={chunkmap_off:,}  comp_size={chunkmap_size:,}")
     ok, stored, computed = compute_header_adler32(str(tib))
     print(f"  header Adler32: stored={stored:08X} computed={computed:08X} {'OK' if ok else 'MISMATCH'}")
@@ -141,7 +143,14 @@ def main(argv=None):
     ap.set_defaults(func=cmd_mount)
 
     args = p.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except Exception as e:
+        from .chunkmap_locator import UnsupportedTibFormat
+        if isinstance(e, UnsupportedTibFormat):
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        raise
 
 
 if __name__ == "__main__":

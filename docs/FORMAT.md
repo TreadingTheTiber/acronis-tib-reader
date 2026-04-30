@@ -58,6 +58,11 @@ The four alternative magics `CheckVolumeHeader` accepts:
 | `0x8F5C36C6` | Filesystem-mode v1 `.tib` (older — TODO)               |
 | (footer)     | `0x179631B4` for tape-archive variants                 |
 
+`.tibx` (Acronis True Image 2020+) is a **different container format** entirely
+— first 4 bytes are `41 01 00 00` (`0x141`), with ASCII `QARCH` at offset 7.
+It uses an SQLite-backed archive layout instead of the volume-header-then-
+block-stream model documented here, and is **not** decodable by this reader.
+
 ## Block stream
 
 Each block:

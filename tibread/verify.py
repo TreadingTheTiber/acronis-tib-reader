@@ -63,8 +63,17 @@ def compute_header_adler32(path: str) -> tuple[bool, int, int]:
     if len(head) < 32:
         raise ValueError(f"{path}: file too small ({len(head)} bytes)")
     magic, hdr_len, _version = struct.unpack_from("<IHH", head, 0)
+    # Detect .tibx and other non-.tib formats with helpful messages.
+    if head[7:12] == b"QARCH":
+        from .chunkmap_locator import UnsupportedTibFormat
+        raise UnsupportedTibFormat(
+            ".tibx (TIB eXtended) is not supported by this reader."
+        )
     if magic not in VALID_MAGICS:
-        raise ValueError(f"{path}: unknown magic 0x{magic:08x}")
+        from .chunkmap_locator import UnsupportedTibFormat
+        raise UnsupportedTibFormat(
+            f"unknown magic {magic:#010x}; not a recognized .tib format."
+        )
     stored = struct.unpack_from("<I", head, ADLER_OFFSET)[0]
     computed = compute_header_adler(head[:32], hdr_len)
     return (computed == stored), stored, computed
