@@ -86,7 +86,6 @@ hardcoded constants.
 from __future__ import annotations
 import os
 import struct
-from pathlib import Path
 from typing import Tuple
 
 VOLUME_MAGIC = 0xA2B924CE
@@ -284,18 +283,12 @@ def _modern_chunkmap_offset(tib_path: str) -> Tuple[int, int]:
                 "(slow, ~3 hours per TB). PRs welcome."
             )
         if len(candidates) > 1:
-            # Disambiguate by smallest distance to meta_offset (chunk map sits
-            # closest before the metadata blob; the MD5 dedup table sits between
-            # them).  We pick the FARTHEST candidate from meta_offset within
-            # the post-data region — but in practice on this generation the
-            # signature is unique.  If we ever see multiple, the chunk map is
-            # the one whose V points to the start of the post-data region.
-            candidates.sort(key=lambda c: -c[1])  # smallest V first... actually largest V is closest to meta
-            # Pick the one with smallest V (farthest from meta_offset = start of post-data region)
+            # In practice the signature is unique on the test files we've
+            # seen. If we ever see multiple, the chunk map is the one whose
+            # V points to the start of the post-data region — i.e. the
+            # candidate with the SMALLEST V (farthest from meta_offset).
             candidates.sort(key=lambda c: c[1])
-            chosen = candidates[0]
-        else:
-            chosen = candidates[0]
+        chosen = candidates[0]
 
         _blob_pos, V, S = chosen
 

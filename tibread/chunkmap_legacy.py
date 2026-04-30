@@ -58,9 +58,8 @@ at file offsets 10,431,214 (135 chunkmap records) and 8,773,374,742
 """
 from __future__ import annotations
 
-import struct
 import zlib
-from typing import Iterator, List, Tuple
+from typing import List, Tuple
 
 from .chunkmap import transpose, decode_records
 

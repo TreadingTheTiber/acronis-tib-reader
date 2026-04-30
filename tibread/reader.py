@@ -25,7 +25,6 @@ Index file formats supported:
     [u32 clusters_per_block][u32 preamble_len][u64 reserved_flags]
     block_count × {u64 file_offset, preamble_len-byte preamble, u32 comp_len}
 """
-import os
 import struct
 import zlib
 import threading
@@ -121,6 +120,11 @@ class TibReader:
         if cached is not None:
             return cached
         file_off, preamble, comp_len = self._get_record(block_idx)
+        if comp_len < self.preamble_len:
+            raise ValueError(
+                f"corrupt index: block {block_idx} comp_len={comp_len} "
+                f"< preamble_len={self.preamble_len}"
+            )
         f = self._file()
         f.seek(file_off + self.preamble_len)
         comp_data = f.read(comp_len - self.preamble_len)

@@ -22,7 +22,7 @@ from pathlib import Path
 
 from . import __version__
 from .reader import TibReader
-from .indexer import build_index, open_tib, _default_index_path
+from .indexer import build_index, open_tib
 
 
 def cmd_info(args):
@@ -34,7 +34,7 @@ def cmd_info(args):
     # very-legacy) fail with a clean single-line error instead of partial
     # output. compute_header_adler32 raises UnsupportedTibFormat on .tibx
     # and unknown magics; detect_format_era covers very-legacy.
-    compute_header_adler32(str(tib))
+    ok, stored, computed = compute_header_adler32(str(tib))
     print(f"tib file: {tib}  ({tib.stat().st_size:,} bytes)")
     era = detect_format_era(str(tib))
     print(f"  format era: {era}")
@@ -44,7 +44,6 @@ def cmd_info(args):
     else:
         print(f"  chunk-map: inline (multiple SequentialChunkMap records "
               f"interleaved with the block stream)")
-    ok, stored, computed = compute_header_adler32(str(tib))
     print(f"  header Adler32: stored={stored:08X} computed={computed:08X} {'OK' if ok else 'MISMATCH'}")
 
     # Build (or load) index, then show partition stats
