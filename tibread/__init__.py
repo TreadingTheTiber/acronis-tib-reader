@@ -3,9 +3,10 @@ tibread — pure-Python read-only access to Acronis True Image .tib backups.
 
 Quick start:
     >>> from tibread import open_tib
-    >>> tib = open_tib("/path/to/backup_full_b1_s1_v1.tib")
-    >>> tib.list_files()                # iterate filenames
-    >>> tib.read_file("path/in/volume") # bytes
+    >>> vol = open_tib("/path/to/backup_full_b1_s1_v1.tib")
+    >>> for entry in vol.list_dir(""):       # "" lists the volume root
+    ...     print(entry.name)
+    >>> data = vol.read_file("Some/File.txt")  # returns bytes
 
 Lower-level access:
     >>> from tibread.reader import TibReader
