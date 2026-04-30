@@ -1,5 +1,8 @@
 # tibread
 
+[![CI](https://github.com/USER/tibread/actions/workflows/ci.yml/badge.svg)](https://github.com/USER/tibread/actions/workflows/ci.yml)
+[![Lint](https://github.com/USER/tibread/actions/workflows/lint.yml/badge.svg)](https://github.com/USER/tibread/actions/workflows/lint.yml)
+
 **Status:** `tibread 0.1.0` — works end-to-end on Acronis True Image
 2013–2018+ sector-mode `.tib` files. See [CHANGELOG.md](CHANGELOG.md) for
 the full feature matrix.
