@@ -115,23 +115,111 @@ parser must inflate to discover the stream's compressed length.
 > NO `<computer_id>`, no file/dir count statistics in the XML, no
 > `<userinfo>` section — only `<productinfo>` and `<task_id>`.
 
-### Post-zlib opaque framing (blob_off 237..272, 36 bytes)
+### Opaque post-zlib framing (now decoded — `0x0048` container)
+
+The "36-byte opaque region at blob_off 237..272" identified in the original
+agent's writeup was a misclassification.  The leading `48 00 60 00` is in
+fact the **u16-tag + u16-total-length** header of a **100-byte container**,
+structurally identical to the newer-format `0x004D` "encryption-recovery /
+verifier" container documented in `METADATA_BLOB_TLV.md`, but with tag
+**`0x0048`** instead of `0x004D`.  Decoded via `decode_legacy_blob_tail.py`
+on 2026-04-30.
+
+| blob_off  | size | contents                                          |
+|-----------|-----:|---------------------------------------------------|
+| 237..240  |  4B  | header `48 00 60 00`  (u16 tag 0x0048 + u16 total length 0x0060=96) |
+| 241..272  | 32B  | verifier prefix (high-entropy / opaque)           |
+| 273..332  | 60B  | embedded sub-records (10 records, parses cleanly) |
+
+The 4-byte u16 length **0x0060 = 96 is INCLUSIVE of the header**, so the
+container ends at blob_off 333 — exactly where the true main TLV stream
+begins (with the `0x12 len=4` record).
+
+#### 32-byte verifier prefix (blob_off 241..272)
 
 ```
-48 00 60 00 04 06 fc d9 52 88 00 02 c0 03 a0 00
-10 f6 27 75 e1 cf 8d e6 2c 5a d1 eb e7 fc 96 19
-95 d3 00 00
+04 06 fc d9 52 88 00 02 c0 03 a0 00 | 10 | f6 27 75 e1 cf 8d e6 2c 5a d1 eb e7 fc 96 19 95 | d3 00 00
+└── 12B struct hdr / flags ────────┘ ^len ^── 16B high-entropy nonce/verifier ─────────────┘ └── 3B tail
+                                     0x10
 ```
 
-This region does NOT parse as TLV. The leading `48 00 60 00` looks like
-a `tag=0x0048 len=0x60=96` framing (matching the 96-byte tag-0x4D
-encryption-recovery container in the newer format), but the payload
-following is mostly opaque high-entropy bytes — likely a 16-byte hash/GUID
-preceded by a small fixed header. Hypothesis (inferred): this is the older
-format's equivalent of the newer-format 80-byte fixed header + 96-byte 0x4D
-container, but with a different shape.
+* The byte at offset +12 = `0x10` = 16 is a length tag for the next field.
+* The 16-byte field at blob_off 254..269 = `f6 27 75 e1 cf 8d e6 2c 5a d1
+  eb e7 fc 96 19 95` is the "high-entropy region" the prior agent flagged.
+* The 3-byte tail `95 d3 00` (with a trailing 0x00 padding at +31) closes
+  the 32-byte prefix.
 
-### Main TLV stream (blob_off 273..end, 63 records)
+**What is the 16-byte high-entropy region?**  It is **NOT a hash** of any
+deterministic in-file content.  Verified by exhaustive sweep over MD5,
+SHA-1, SHA-256 (including `[:16]` and `[-16:]` truncations) of every
+plausible candidate: chunk-map (compressed and inflated), embedded zlib #1
+and #2 (compressed and inflated), the metadata blob itself (with and
+without the 32-byte prefix), the file header (every prefix length 16..65536),
+the trailer body, and several whole-file ranges.  No collision found.
+
+The region is also unique in the entire 8.78 GB file (single occurrence at
+blob_off 254 only).  **Inferred** role: a per-archive identifier / nonce /
+verifier seed — analogous to the newer-format `0x004D` verifier prefix —
+emitted opaquely in unencrypted backups, used by the encryption path in
+encrypted backups.  Without a second TI 2014-era archive sample to diff
+against, we cannot confirm whether the value is per-archive-random,
+per-task-stable, or per-machine-stable.
+
+Confidence:
+* Container framing (`0x0048`, length 96 inclusive): **confirmed** — the
+  parse boundary at blob_off 333 lines up byte-exactly with the start of
+  the main TLV stream's `0x12 len=4` record.
+* 16-byte field as "per-archive nonce, not a content hash":
+  **inferred-but-strongly-supported** — exhaustive hash sweep ruled out
+  every deterministic-content hypothesis tested.
+
+#### 60-byte embedded sub-records (blob_off 273..332)
+
+These are the 10 records the prior agent attributed to the "main TLV
+stream"; they actually live INSIDE the `0x0048` container:
+
+| blob_off | tag    | sub  | len | payload      | meaning |
+|----------|--------|------|----:|--------------|---------|
+| 273      | 0xD6   | 0    | 5   | `9f 4d 23 0b 02` | 5B LE timestamp/offset = 0x020b234d9f (BLOB_START + 7) |
+| 281      | 0xD7   | 0    | 1   | `c6`         | u8 version/flag |
+| 285      | 0x00.80 | --   | 5   | `00 90 73 42 04` | partition size = 0x442739000 |
+| 293      | 0x01.80 | --   | 5   | `00 90 73 42 04` | mirror of 0x00.80 |
+| 301      | 0x07.80 | --   | 5   | `65 4e 23 0b 02` | meta-self-pointer = BLOB_START + 205 |
+| 309      | 0x6A   | 0    | 0   | --           | volume GUID (EMPTY in older format) |
+| 312      | 0x00.05 | --   | 5   | `78 4d 23 0b 02` | 5B timestamp = BLOB_START - 32 |
+| 319      | 0x01   | 0    | 1   | `27`         | flag |
+| 323      | 0x02   | 0    | 2   | `00 02`      | u16 |
+| 328      | 0x07   | 0    | 2   | `00 02`      | u16 |
+
+Note the parallel with the newer-format `0x004D` container's interior:
+both nest the same set of `(0xD6, 0xD7, 0x00.80, 0x01.80, 0x07.80, 0x6A,
+...)` sub-records.  In the older format the timestamps/offsets are 5B
+instead of 6B, which contributes to the 60-byte vs 64-byte sub-record
+region size difference.
+
+#### Implication for blob coverage
+
+After this decoding, miner1's 921-byte metadata blob has **100% coverage**
+with no remaining opaque regions.  Updated layout:
+
+```
+file_off    blob_off    bytes      contents
+8776797592   0          18         pre-zlib TLV records (4 records)
+8776797610   18         21         embedded ZLIB stream #1 (chunk-map descriptor, 20B)
+8776797631   39         198        embedded ZLIB stream #2 (XML <metainfo>, 239B)
+8776797829   237        100        0x0048 verifier-recovery container (NEW DECODE)
+                                     - blob_off 237..240: u16 tag + u16 length header
+                                     - blob_off 241..272: 32B verifier prefix (per-archive nonce)
+                                     - blob_off 273..332: 60B embedded sub-records (10 TLVs)
+8776797925   333        588        main TLV stream (53 records — 0x12, 0x48, 0x49, ...)
+8776798513   921        --         END
+```
+
+(The original agent's "63 records" main-TLV count was correct in aggregate
+but split incorrectly; under the corrected boundary it is **10 sub-records
+inside the container + 53 records in the main stream = 63 total**.)
+
+### Main TLV stream (blob_off 333..end, 53 records)
 
 Notable records:
 
@@ -344,13 +432,91 @@ agent and the Ghidra version-dispatch agent can confirm.
 | 2 source volumes                  | drive D + drive F via tag 0x6B         | confirmed |
 | TI build 16.0.6514                | embedded XML metainfo                  | confirmed |
 
+## Inline #1 in the block stream (file_off 10,431,214)
+
+Inline #1 is a **`SequentialChunkMap` fragment** — the same TLV-preamble +
+zlib-stream pattern that the main on-disk chunk map uses, just smaller and
+embedded inline within the block stream.  This was confirmed by both the
+SequentialChunkMap Ghidra deep-dive agent (decompiled `FUN_08982090`,
+`SequentialChunkMap` ctor) and the inline-records-decoder agent (independent
+re-derivation).  See `FORMAT_LEGACY_INLINE_RECORDS.md` and
+`/home/colin/tibread/decode_inline_records.py`.
+
+Layout:
+
+```
+file_off 10431214        u8     L = 0x11 (TLV preamble length, 17 bytes)
+file_off 10431215..10431231  17B   u16-LE-tag TLV with:
+                                      tag 0x02  sector_size       = 512
+                                      tag 0x03  sectors_per_cluster = 8
+                                      tag 0x04  clusters_per_block  = 64
+                                      tag 0x06  record_count        = 135
+file_off 10431232..10431569  338B  zlib stream → 1620 bytes inflated
+                                   (= 135 records × 12 bytes each)
+```
+
+**Decode pipeline** (matches `tibread.chunkmap`):
+
+1. Inflate the 338-byte zlib stream to 1620 bytes.
+2. **Column-major → row-major byte transpose** (matrix shape `(12, 135) → (135, 12)`).
+3. Parse each 12-byte row as `{u64 zigzag-delta enc_offset, u32 length}`.
+4. Accumulate offsets via `running ← (offset + length)`; sparse rows have `length == 0`.
+
+This yields 135 `(file_offset_in_data_area, length)` records — 100 stored
+chunks + 35 sparse (length=0). The first record is `(0x685, 146803)`,
+which maps to absolute file offset `0x685 + 32 = 0x6A5`, where bytes `+8`
+are exactly `78 01` (zlib magic) — confirming this is a chunk-map locator
+record, not a hash or sector capture.
+
+### Why a previous agent misread this as an "on-disk metadata sector"
+
+A prior decode attempt (the legacy-blob-tail agent, 2026-04-30) examined
+the 1620-byte inflated payload **without applying the transpose step** and
+read clusters of repeated bytes (`85 85 85 ...`, `06 06 06 ...`) as
+"zeroed/sparse on-disk metadata characteristic of NTFS bootsector / MBR /
+partition table / volume header".  This was incorrect.  Verified
+disqualification:
+
+* No `NTFS    ` magic at offset 3 of the inflated buffer (would-be NTFS bootsector).
+* No `55 AA` signature at offsets 510..511 (would-be MBR/bootsector tail).
+* Full-buffer Shannon entropy = **1.914 bits/byte** (a real captured sector
+  with mixed metadata is typically much higher; a zero-padded one would
+  have NO high-entropy regions at all).
+* Only **7/100** 16-byte windows have entropy ≥ 3.5 bits/byte (a real hash
+  table would have ~100/100; a real sector capture would have a few
+  high-entropy clusters but not in 16-byte-aligned windows).
+
+The repeated `0x85` and `0x06` byte runs the misreading flagged are in fact
+the **per-column high bytes of `length` and `enc_offset` fields** of the
+column-major-stored zigzag-delta records.  Pre-transpose, these high bytes
+are clustered together (one column per byte-position); post-transpose, they
+distribute across the records as expected.  This is the diagnostic
+signature of column-major chunk-map storage, not of a sector dump.
+
+### Validation
+
+For the first 30 non-sparse records of inline #1, every decoded
+`file_offset + 8` (skipping the 8-byte popcount preamble) starts with the
+`78 01` zlib magic in `miner1_default_full_b1_s1_v1.tib` — a 30/30 hit
+rate that is statistically impossible under any other interpretation.
+
+Inline #2 (file_off 8,773,374,742) follows the same format with 259,108
+records, covering the bulk of the chunk-map.  Together inline #1 and #2
+provide all 259,243 chunk-map records for miner1.
+
+Confidence: **confirmed** — three independent decoders agree on the
+chunk-map interpretation (Ghidra `SequentialChunkMap` ctor decompile +
+matrix-transpose + zigzag-delta + 30/30 zlib-magic validation).
+
 ## Suggested follow-ups for other agents
 
-1. **Decode the 36-byte post-zlib opaque framing** (blob_off 237..272). It
-   may contain encryption-recovery data, a SHA256 verifier, or additional
-   GUIDs (the byte pattern includes a 16-byte high-entropy region
-   `c0 03 a0 00 10 f6 27 75 e1 cf 8d e6 2c 5a d1 eb` that looks like a hash
-   or GUID).
+1. **(RESOLVED 2026-04-30)** ~~Decode the 36-byte post-zlib opaque framing~~.
+   The region is the leading 36 bytes of a 100-byte `0x0048` u16-tagged
+   container (older-format equivalent of the newer-format `0x004D`
+   verifier-recovery container).  The 16-byte high-entropy field within is
+   a per-archive nonce/verifier (NOT a hash of any deterministic in-file
+   content; verified by exhaustive sweep).  See section
+   "Opaque post-zlib framing (now decoded — `0x0048` container)".
 2. **Trace `BLOB_START` discovery in product.bin** for the older format —
    the version-dispatch agent's Ghidra session can identify the function
    that locates the metadata blob in v16-era backups.
@@ -358,12 +524,26 @@ agent and the Ghidra version-dispatch agent can confirm.
    stream by reading bytes `[BLOB_START - 58596 .. BLOB_START]` and
    inflating — the empirical-walk agent can do this directly.
 4. **Find `volumeId` in older format** — possibly under a tag we currently
-   classify as "unknown" or in the 36-byte opaque framing.
+   classify as "unknown".  The 16-byte high-entropy field at blob_off
+   254..269 was tested and does NOT match volumeId (which is `0x06496f23`,
+   only 4 bytes); ruled out.
+5. **Confirm the 16-byte nonce's behavior** — diff against a SECOND
+   TI 2014-era archive (different machine, different task) to determine
+   whether it is per-archive-random, per-task-stable, or per-machine-stable.
+6. **(RESOLVED 2026-04-30)** ~~Identify inline #1's payload sector-class~~
+   — the 1620-byte inflated payload is a 135-record `SequentialChunkMap`
+   fragment, NOT a captured on-disk metadata region.  The
+   metadata-sector hypothesis from an earlier agent failed to apply the
+   column-major→row-major byte transpose; once applied, all 100 non-sparse
+   records decode to valid `(file_offset, length)` pairs that point at
+   `78 01` zlib-magic blocks in miner1.  See section "Inline #1 in the
+   block stream" above and `FORMAT_LEGACY_INLINE_RECORDS.md`.
 
 ## Files
 
-* Decoder: `/home/colin/tibread/scan_miner1_metadata.py`
-* This document: `/home/colin/tibread/dist/docs/FORMAT_LEGACY_METADATA.md`
+* Decoder (main metadata blob): `/home/colin/tibread/scan_miner1_metadata.py`
+* Decoder (`0x0048` container + inline #1): `/home/colin/tibread/decode_legacy_blob_tail.py`
+* This document: `/home/colin/tibread/dist/docs/legacy/FORMAT_LEGACY_METADATA.md`
 * Related: `/home/colin/tibread/dist/tibread/metadata.py` (newer-format
-  decoder), `/home/colin/tibread/dist/docs/METADATA_BLOB_TLV.md`,
-  `/home/colin/tibread/dist/docs/TIB_VARIANTS.md`.
+  decoder), `/home/colin/tibread/METADATA_BLOB_TLV.md`,
+  `/home/colin/tibread/dist/docs/legacy/FORMAT_LEGACY.md`.
