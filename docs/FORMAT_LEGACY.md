@@ -232,11 +232,17 @@ hashlib.md5(b'\xff'*8 + b'\x00'*(64*4096)).hexdigest()
 # 'e9e66ccfeac74dfd4040aedc086a29b0'
 ```
 
-The manifest covers blocks 100..N-1; blocks 0..99 are tracked by inline
-metadata #1 (a 1620-byte = 20 + 100×16 zlib stream describing them
-individually). The legacy format apparently flushes a small fingerprint
-batch shortly after starting a backup so a partial archive remains
-recoverable.
+The MD5 manifest in the tail is **contiguous** and covers **all stored
+blocks 0..N-1** in storage order. There is **no** inline MD5 fingerprint
+batch — the inline records earlier in the file serve a different purpose.
+
+Inline records #1 and #2 are **split SequentialChunkMap fragments**, not
+MD5-fingerprint batches. Each has the structure
+`[u8 L][L-byte TLV header][zlib stream of 12-byte chunk-map records]`
+(e.g. on miner1: TLV tags `0x02=512`, `0x03=8`, `0x04=64`, `0x06=record_count`).
+Inline #1 = 356 bytes on disk → 135 chunk-map records; inline #2 → 259,108
+chunk-map records. Together they index all 259,243 stored extents — they
+are an *extent map*, not a hash batch.
 
 ### Residual region
 
