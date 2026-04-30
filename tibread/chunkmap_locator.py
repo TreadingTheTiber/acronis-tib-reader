@@ -94,13 +94,43 @@ TRAILER_SECTOR = bytes.fromhex("2B8AE194")
 TRAILER_FS = bytes.fromhex("2C8AE194")
 
 
+class UnsupportedTibFormat(ValueError):
+    """Raised when a file is identified as a .tib-family format the reader
+    cannot handle (e.g., .tibx, filesystem-mode, encrypted)."""
+    pass
+
+
 def _read_volume_header(f) -> Tuple[int, int]:
     """Returns (data_start, version)."""
     f.seek(0)
     buf = f.read(32)
     magic, hdrlen, version = struct.unpack_from("<IHH", buf, 0)
+
+    # Detect .tibx (TIB eXtended, TI 2020+): "QARCH" at offset 7.
+    if buf[7:12] == b"QARCH":
+        raise UnsupportedTibFormat(
+            ".tibx (TIB eXtended) is not supported by this reader. "
+            ".tibx is a different container format introduced with Acronis "
+            "True Image 2020+ and uses an SQLite-backed archive layout. "
+            "tibread currently supports sector-mode .tib only "
+            "(magic 0xA2B924CE)."
+        )
+    # Filesystem-mode .tib variants — known but not yet implemented.
+    if magic == 0x44686EB4:
+        raise UnsupportedTibFormat(
+            "filesystem-mode .tib v2 (magic 0x44686EB4) is not yet implemented. "
+            "tibread currently supports sector-mode .tib only."
+        )
+    if magic == 0x8F5C36C6:
+        raise UnsupportedTibFormat(
+            "filesystem-mode .tib v1 (magic 0x8F5C36C6) is not yet implemented. "
+            "tibread currently supports sector-mode .tib only."
+        )
     if magic != VOLUME_MAGIC:
-        raise ValueError(f"not a TIB file (magic={magic:#x})")
+        raise UnsupportedTibFormat(
+            f"file does not appear to be an Acronis .tib backup "
+            f"(magic={magic:#010x}, expected {VOLUME_MAGIC:#010x} for sector-mode)."
+        )
     return hdrlen, version
 
 
