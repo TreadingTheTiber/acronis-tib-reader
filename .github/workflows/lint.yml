@@ -1,0 +1,38 @@
+name: Lint
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  lint:
+    name: flake8 (syntax + undefined names)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install flake8
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8
+
+      - name: Run flake8 (errors only)
+        # Lightweight: stop the build only on real bugs (E9 syntax errors,
+        # F63/F7/F82 undefined names, bad except-bare, etc.).  No style
+        # nits, no line-length / complexity gates.
+        run: |
+          flake8 tibread tools \
+            --count \
+            --select=E9,F63,F7,F82 \
+            --show-source \
+            --statistics
