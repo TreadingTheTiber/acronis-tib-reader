@@ -193,14 +193,43 @@ def _read_trailer(f, file_size: int) -> Tuple[int, int, int, int]:
     return data_start, slice_size, meta_offset, trailer_size
 
 
+def detect_format_era(tib_path: str) -> str:
+    """Returns 'modern' or 'legacy'.
+
+    Detection strategy mirrors product.bin's FUN_08973290: the legacy
+    sector-mode `.tib` (TI 2014/2015/2016 era) does NOT carry a modern
+    chunk-map locator (`06 V[6] 01 00 03 S[3]`) in its metadata blob;
+    the modern format does. We probe the metadata-blob region for the
+    13-byte locator signature and classify accordingly.
+
+    Note: this is structurally equivalent to the binary's `tag 0x9b`
+    presence test — modern stores tag 0x9b's body as the chunk-map
+    locator, and the locator's 13-byte signature is the visible
+    fingerprint.
+    """
+    try:
+        _modern_chunkmap_offset(tib_path)
+        return "modern"
+    except UnsupportedTibFormat:
+        # _modern_chunkmap_offset raises UnsupportedTibFormat with a
+        # "no on-disk chunk-map locator was found" message when the blob
+        # has no 13-byte locator signature.
+        return "legacy"
+
+
 def discover_chunkmap_offset(tib_path: str) -> Tuple[int, int]:
     """Find the on-disk chunk-map zlib stream's file offset and compressed size.
 
     Returns (zlib_offset, zlib_size) suitable for
     `build_skipmap_from_tib.decode_chunk_map(tib_path, file_offset, compressed_size)`.
 
-    Raises ValueError if the chunk-map locator can't be uniquely identified.
+    Raises UnsupportedTibFormat if the chunk-map locator can't be found
+    (e.g. legacy format — call `detect_format_era` first to dispatch).
     """
+    return _modern_chunkmap_offset(tib_path)
+
+
+def _modern_chunkmap_offset(tib_path: str) -> Tuple[int, int]:
     file_size = os.path.getsize(tib_path)
     with open(tib_path, "rb") as f:
         data_start, slice_size, meta_offset, trailer_size = _read_trailer(f, file_size)

@@ -92,7 +92,8 @@ data = vol.read_file("Users/alice/Documents/x.docx")
 
 | Format | Status | Notes |
 |---|---|---|
-| Sector-mode `.tib` (magic `0xA2B924CE`) | ✅ Supported | The common full-disk backup format from Acronis True Image 2010-2019 |
+| Sector-mode `.tib`, modern (TI 2018+, 16-byte preamble + 128-cluster blocks) | ✅ Supported | The common full-disk backup format from Acronis True Image 2018-2019 |
+| Sector-mode `.tib`, legacy (TI 2014/2015/2016, 8-byte preamble + 64-cluster blocks) | ✅ Supported | Recognised by absence of TLV tag `0x9b` in the metadata blob; chunk map is split across inline `SequentialChunkMap` records interleaved with the block stream. See `docs/FORMAT_LEGACY.md`. |
 | `.tibx` (TIB eXtended, "QARCH" archive) | ❌ Different format, not supported | Acronis True Image 2020+ replaced `.tib` with `.tibx`, which uses an SQLite-backed archive container instead of the layout this reader handles. **If your file is `.tibx`, use a different tool.** |
 | Filesystem-mode v1 `.tib` (magic `0x8F5C36C6`) | ⚠️ Format spec'd, not yet implemented | See `docs/FORMAT.md` |
 | Filesystem-mode v2 `.tib` (magic `0x44686EB4`) | ⚠️ Format spec'd, not yet implemented | See `docs/FORMAT.md` |
