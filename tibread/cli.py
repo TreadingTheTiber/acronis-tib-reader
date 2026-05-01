@@ -110,6 +110,33 @@ def cmd_extract(args):
     return 0
 
 
+def cmd_extract_fs(args):
+    """Recover file content from an FS-mode hybrid .tib (share/NAS backup).
+
+    The FS-mode hybrid layout stores files as length-prefixed zlib-stored
+    blocks rather than as a sector-mode block stream. We can recover the
+    raw file content but not the original filenames (those live in `f`
+    directory records whose format we haven't reverse-engineered yet),
+    so files are emitted as `recovered_NNNNNN.<ext>` with the extension
+    sniffed from the content magic.
+    """
+    from .chunkmap_fs import extract_files, is_fs_mode_hybrid
+    if not is_fs_mode_hybrid(args.tib):
+        print(f"error: {args.tib} is not an FS-mode hybrid .tib "
+              f"(sector-mode header + 0x94E18A2C trailer). "
+              f"Use `tib info` / `tib extract` for normal .tib files.",
+              file=sys.stderr)
+        return 2
+    n = extract_files(
+        args.tib, args.outdir,
+        max_files=args.max_files,
+        max_offset=args.max_bytes,
+        progress=True,
+    )
+    print(f"recovered {n} files into {args.outdir}")
+    return 0
+
+
 def cmd_tibx_info(args):
     """Print a structural summary of an Acronis archive3 (.tibx) file."""
     from .tibx import TibxReader
@@ -842,6 +869,23 @@ def main(argv=None):
     )
     ap.add_argument("tibx")
     ap.set_defaults(func=cmd_tibx_chain)
+
+    ap = sub.add_parser(
+        "extract-fs",
+        help="Recover file content from an FS-mode hybrid .tib "
+             "(share/NAS backup) [experimental].",
+    )
+    ap.add_argument("tib", help="Path to the FS-mode hybrid .tib.")
+    ap.add_argument("outdir", help="Directory to write recovered files into.")
+    ap.add_argument(
+        "--max-files", type=int, default=None,
+        help="Stop after recovering this many files (default: no limit).",
+    )
+    ap.add_argument(
+        "--max-bytes", type=int, default=None,
+        help="Stop walking past this file offset (default: walk to EOF).",
+    )
+    ap.set_defaults(func=cmd_extract_fs)
 
     ap = sub.add_parser(
         "mount",
