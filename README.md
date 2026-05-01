@@ -3,12 +3,18 @@
 [![CI](https://github.com/USER/tibread/actions/workflows/ci.yml/badge.svg)](https://github.com/USER/tibread/actions/workflows/ci.yml)
 [![Lint](https://github.com/USER/tibread/actions/workflows/lint.yml/badge.svg)](https://github.com/USER/tibread/actions/workflows/lint.yml)
 
-**Status:** `tibread 0.1.0` — works end-to-end on Acronis True Image
-2013–2018+ sector-mode `.tib` files. See [CHANGELOG.md](CHANGELOG.md) for
-the full feature matrix.
+**Status:** `tibread 0.2.0` — works end-to-end on `.tib` (TI 2013–2018+)
+and `.tibx` (TI 2020+). See [CHANGELOG.md](CHANGELOG.md) for the full
+feature matrix.
 
-**Pure-Python read-only access to Acronis True Image `.tib` backups.**
-Mount, list, and extract files from `.tib` files without Acronis software.
+> **0.2.0 — first open-source `.tibx` reader.** This release adds a
+> feature-complete read-only reader for the `.tibx` (QARCH archive3)
+> container shipped by Acronis True Image 2020+, reverse-engineered
+> directly from `archive3.dll`. End-to-end FUSE mount works on real
+> `.tibx` files (`tib mount backup.tibx /mnt/x --partition N`).
+
+**Pure-Python read-only access to Acronis True Image `.tib` and `.tibx`
+backups.** Mount, list, and extract files without Acronis software.
 
 This was originally built to recover a 1 TB backup from a long-discontinued
 Acronis True Image installation. It now supports any sector-mode `.tib`
@@ -60,7 +66,7 @@ pip install -e '.[fast]'          # + numpy for ~5× faster index builds
 Verify the install:
 
 ```bash
-tib --version          # -> tibread 0.1.0
+tib --version          # -> tibread 0.2.0
 tib info /path/to/backup_full_b1_s1_v1.tib
 ```
 
@@ -256,14 +262,17 @@ not, please open an issue with `tib info <file>` output.
 
 ## Status
 
-This is a 0.1 release. It works end-to-end for the original 1 TB recovery
-that motivated it (~99% file recovery vs. the source XML metainfo's count;
-remaining failures are Recycle-Bin entries with deallocated source clusters
-and old QuickTime `.mov` files with non-`ftyp` headers — both genuine, not
-reader bugs) plus a TI 2013 legacy backup at 100% parity. It almost
-certainly contains rough edges on other people's `.tib` files. Bug reports
-very welcome — see `CHANGELOG.md` for the precise scope of supported and
-unsupported variants.
+This is the 0.2.0 release — the first open-source `.tibx` reader. It
+works end-to-end for the original 1 TB `.tib` recovery that motivated
+the project (~99% file recovery vs. the source XML metainfo's count;
+remaining failures are Recycle-Bin entries with deallocated source
+clusters and old QuickTime `.mov` files with non-`ftyp` headers — both
+genuine, not reader bugs), a TI 2013 legacy `.tib` backup at 100%
+parity, and the reference `.tibx` file (149 NTFS files including
+`bootmgr`, `BCD`, etc. listed via the FUSE mount). It almost certainly
+contains rough edges on other people's files. Bug reports very welcome
+— see `CHANGELOG.md` for the precise scope of supported and unsupported
+variants.
 
 ## Acknowledgments
 
