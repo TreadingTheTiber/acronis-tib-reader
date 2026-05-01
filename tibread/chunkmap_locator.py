@@ -99,8 +99,34 @@ class UnsupportedTibFormat(ValueError):
     pass
 
 
+def find_last_volume(path: str) -> str:
+    """For multi-volume .tib backups (`*_v1.tib`, `*_v2.tib`, …), find the
+    file with the highest sequence number. Returns the path unchanged
+    when not a multi-volume name.
+
+    Multi-volume backups split the block stream across N files but only
+    the LAST one carries the metadata blob + chunk-map. To open the
+    archive we always need the last volume.
+    """
+    import re
+    m = re.match(r"^(.*_v)(\d+)(\.tib)$", path)
+    if not m:
+        return path
+    prefix, _, ext = m.groups()
+    n = 1
+    while True:
+        candidate = f"{prefix}{n + 1}{ext}"
+        if not os.path.exists(candidate):
+            break
+        n += 1
+    if n == 1:
+        return path  # not actually multi-volume
+    return f"{prefix}{n}{ext}"
+
+
 def _read_volume_header(f) -> Tuple[int, int]:
-    """Returns (data_start, version)."""
+    """Returns (data_start, version). Raises UnsupportedTibFormat for
+    non-last volumes of a multi-volume backup."""
     f.seek(0)
     buf = f.read(32)
     magic, hdrlen, version = struct.unpack_from("<IHH", buf, 0)
@@ -165,6 +191,38 @@ def _read_volume_header(f) -> Tuple[int, int]:
             f"(magic={magic:#010x}, expected {VOLUME_MAGIC:#010x} for sector-mode)."
         )
 
+    # Multi-volume detection: only the LAST volume carries the metadata
+    # blob + chunk-map. A volume header's `sequence` field at offset 0x14
+    # is 1-based; sequence>1 means "definitely not the last volume". For
+    # sequence==1 we may still be the FIRST of many — caller must check
+    # for sibling `*_vN.tib` files via `find_last_volume()`.
+    sequence = struct.unpack_from("<I", buf, 0x14)[0]
+    name = getattr(f, "name", "")
+    if sequence > 1:
+        # Try to point at the actual last volume.
+        last = find_last_volume(name) if name else None
+        last_hint = (
+            f" The last volume of this chain appears to be: {last!r}"
+            if last and last != name else ""
+        )
+        raise UnsupportedTibFormat(
+            f"this .tib is volume #{sequence} of a multi-volume backup chain "
+            f"(filename pattern `*_v<N>.tib`). Only the LAST volume carries "
+            f"the metadata blob + chunk-map needed to open the archive.{last_hint} "
+            f"Open the highest-numbered `_vN.tib` file instead."
+        )
+    # sequence == 1: could be a single-volume backup OR the first of many.
+    # If siblings exist (a `_v2.tib` next to us), redirect to the last.
+    if sequence == 1 and name:
+        last = find_last_volume(name)
+        if last != name:
+            raise UnsupportedTibFormat(
+                f"this .tib is volume #1 of a multi-volume backup chain. "
+                f"The metadata + chunk-map live in the LAST volume. "
+                f"Open `{os.path.basename(last)}` (sequence detected via "
+                f"sibling-file scan) instead."
+            )
+
     # "Very-legacy" detection (TI 2010-2013, builds 12000-15999):
     #   version == 1 AND header u32 at +0x1C == 0x1000 (4 KiB sector_size)
     # Acronis's own reader handles these by destructively MIGRATING the file
@@ -202,8 +260,18 @@ def _read_trailer(f, file_size: int) -> Tuple[int, int, int, int]:
     f.seek(concat_end_file - 4)
     magic = f.read(4)
     if magic != TRAILER_SECTOR:
-        raise ValueError(
-            f"only sector-mode .tib supported here (trailer magic={magic.hex()})"
+        if magic == TRAILER_FS:
+            raise UnsupportedTibFormat(
+                "this .tib has a sector-mode volume header (magic 0xA2B924CE) "
+                "but a filesystem-mode trailer (magic 0x94E18A2C). This hybrid "
+                "layout is produced by some Acronis True Image variants when "
+                "backing up file shares (rather than block devices). It is not "
+                "yet supported — the chunk-map walker for FS-mode trailers "
+                "needs to be implemented."
+            )
+        raise UnsupportedTibFormat(
+            f"unrecognized .tib trailer magic {magic.hex()} "
+            f"(expected sector-mode {TRAILER_SECTOR.hex()})"
         )
 
     f.seek(concat_end_file - 8)
