@@ -40,27 +40,30 @@ What's still WIP (delegated to ``lsm_cells``)
 
 LSM tree mapping (TLV slot → tree)
 ----------------------------------
-Authoritative table (matches the loader's struct offsets and decoder
-length asserts). See ``ARCHIVE3_LSM_SUPERBLOCK.md`` for cross-checks.
+Authoritative table — derived from the loader's ``lsm_sb_read`` slot
+order in ``FUN_1800155d0`` plus the in-binary tree-name strings used
+by ``FUN_1800094a0`` at each ``arch+0x10XX`` tree-create call site,
+cross-checked against ``archive_get_data_map`` /
+``archive_get_segment_map`` getters.
+
+The single authoritative reference is
+``docs/legacy/ARCHIVE3_TLV_DIRECTORY.md`` — refer to it for the full
+evidence trail. Prior name guesses (``items``, ``name_map``, etc.)
+were superseded by that consolidation pass.
 
 ==========  ======================  =========  ===========
 TLV slot    Canonical tree name     key bytes  value bytes
 ==========  ======================  =========  ===========
-0           ``lsm`` (meta)          0          0 (recursive)
-1           ``data_map`` (dmap)     31         10
+0           ``lsm`` / ``imap``      0          0 (recursive)
+1           ``data_map`` / ``dmap`` 31         10
 2           ``segment_map``         8          32
-3           (unidentified)          9          0
-4           ``dedup_map``           (empty)    (empty)
-5           ``nlink_map``           4 / >=12   132
-6           ``slices``              20         0
-7           ``umap``                20         0 (empty)
-8           ``notary`` (v7+)        special    special
+3           ``dedup_map``           9          0
+4           ``nlink_map``           >=12       132
+5           ``slices`` / ``smap``   4          132
+6           ``umap``                20         0
+7           ``keymap``              (special)  (special)
+8           ``notary`` (v7+)        (special)  (special)
 ==========  ======================  =========  ===========
-
-Strings-agent's ``name_map`` candidate maps cleanly onto TLV[3]
-(key=9, value=0) — its keys form a sorted lexicographic sequence
-spanning the full byte range, consistent with a hashed-name index.
-This is a strong inference but not yet decoder-confirmed.
 """
 
 from __future__ import annotations
@@ -113,20 +116,50 @@ LEAF_PAYLOAD_OFFSET_LZ4 = LEAF_INNER_HEADER_LEN + LEAF_LZ4_PREAMBLE_LEN  # 0x3c
 LEAF_HEADER_FIXED_LEN = 0x14
 LEAF_PAYLOAD_OFFSET = 0x35
 
-# Per-tree key / value sizes for the L-SB record at each TLV slot.
-# Used by :func:`walk_ctree` to know how to slice each LDIR record.
-# Indexed by ``(key_length, value_length)``; the value sizes for the
-# trees that actually appear on disk are baked in.
+# Canonical TLV slot → user-facing tree name. Authoritative source:
+# ``docs/legacy/ARCHIVE3_TLV_DIRECTORY.md``. The names below are the
+# user-facing aliases; the loader's internal C-source names are kept
+# in ``TLV_TREE_NAMES_INTERNAL`` for completeness.
 TLV_TREE_NAMES: Dict[int, str] = {
-    0: "lsm",
-    1: "data_map",
+    0: "lsm",          # internal: imap     (arch+0x1078)
+    1: "data_map",     # internal: dmap     (arch+0x1088)
+    2: "segment_map",  # internal: segment_map (arch+0x1090)
+    3: "dedup_map",    # internal: dedup_map (arch+0x10e8)
+    4: "nlink_map",    # internal: nlink_map (arch+0x10a8)
+    5: "slices",       # internal: smap     (arch+0x10b8)
+    6: "umap",         # internal: umap     (arch+0x10f8)
+    7: "keymap",       # internal: keymap   (arch+0x12a8)
+    8: "notary",       # internal: notary   (arch+0x12b0; v7+)
+}
+
+# The loader's internal (C-source) names for each tree, exactly as
+# they appear in the post-header init at FUN_1800094a0. Kept for tools
+# that prefer to display the on-disk format's own naming.
+TLV_TREE_NAMES_INTERNAL: Dict[int, str] = {
+    0: "imap",
+    1: "dmap",
     2: "segment_map",
-    3: "tlv3",            # unidentified, possibly name_map
-    4: "dedup_map",
-    5: "nlink_map",
-    6: "slices",
-    7: "umap",
+    3: "dedup_map",
+    4: "nlink_map",
+    5: "smap",
+    6: "umap",
+    7: "keymap",
     8: "notary",
+}
+
+# Per-TLV-slot ``arch+0x10XX`` context offset, hard-coded by the loader
+# (FUN_1800155d0). Useful when correlating decompiled call sites
+# with TLV slots.
+TLV_ARCH_OFFSET: Dict[int, int] = {
+    0: 0x1078,
+    1: 0x1088,
+    2: 0x1090,
+    3: 0x10e8,
+    4: 0x10a8,
+    5: 0x10b8,
+    6: 0x10f8,
+    7: 0x12a8,
+    8: 0x12b0,
 }
 
 
@@ -604,46 +637,28 @@ def parse_leaf_header(body: bytes, page_type: int) -> LsmPageHeader:
 def decode_lsm_page_payload(body: bytes) -> Tuple[LsmPageHeader, bytes]:
     """Return ``(header, decompressed_payload)`` for one LEAF/LDIR page.
 
-    Handles ``encoding=0`` (raw) and ``encoding=1`` (Acronis LZ4 with
-    the 8-byte ``[c_len][u_len]`` preamble at body+0x34). Encrypted
-    pages (``encoding & 0x80``) raise :class:`NotImplementedError`.
+    Handles ``encoding=0`` (raw) and ``encoding=1`` (Acronis multi-block
+    LZ4: a sequence of ``[c_len BE u32][u_len BE u32][lz4_block]`` tuples
+    consumed by ``LZ4_decompress_safe_continue`` -- each block decompresses
+    against the previously emitted bytes as its history dictionary).
+    Encrypted pages (``encoding & 0x80``) raise :class:`NotImplementedError`.
+
+    The actual byte-level decoding lives in
+    :func:`tibread.tibx.lsm_cells.decode_cell_stream`, which is the single
+    source of truth for the cell-stream codec. This wrapper exists for
+    backward compatibility with callers that imported the old name.
     """
+    from .lsm_cells import decode_cell_stream, parse_inner_header
+
     page_type = PAGE_TYPE_LEAF if body[:4] == INNER_MAGIC_LEAF else PAGE_TYPE_LDIR
     hdr = parse_leaf_header(body, page_type)
-    enc = hdr.encoding
-    if enc & 0x80:
+    inner_hdr = parse_inner_header(body)
+    if inner_hdr.is_encrypted:
         raise NotImplementedError(
-            f"encrypted LSM page (encoding=0x{enc:02x}) not supported"
+            f"encrypted LSM page (encoding=0x{inner_hdr.encoding:02x}) not supported"
         )
-    if enc == 0:
-        # Raw cells: the record area starts immediately after the 0x34
-        # header. ``hdr.total_rec_len`` is the byte length.
-        return hdr, body[0x34 : 0x34 + hdr.total_rec_len]
-    if enc == 1:
-        # LZ4 with 8-byte Acronis preamble.
-        if len(body) < 0x3c:
-            raise ValueError("LZ4 LSM page body too short for preamble")
-        inner_clen = struct.unpack(">I", body[0x34:0x38])[0]
-        inner_ulen = struct.unpack(">I", body[0x38:0x3c])[0]
-        if 0x3c + inner_clen > len(body):
-            raise ValueError(
-                f"LZ4 frame extends past page body: c_len={inner_clen}, body={len(body)}"
-            )
-        try:
-            import lz4.block  # type: ignore[import-not-found]
-        except ImportError as e:  # pragma: no cover
-            raise RuntimeError(
-                "decoding LZ4-compressed LSM pages requires the 'lz4' package; "
-                "install with `pip install lz4`"
-            ) from e
-        frame = body[0x3c : 0x3c + inner_clen]
-        decoded = lz4.block.decompress(frame, uncompressed_size=inner_ulen)
-        if len(decoded) != inner_ulen:
-            raise ValueError(
-                f"LZ4 decoded length {len(decoded)} != expected {inner_ulen}"
-            )
-        return hdr, decoded
-    raise NotImplementedError(f"unknown LSM page encoding 0x{enc:02x}")
+    decoded = decode_cell_stream(body, inner_hdr)
+    return hdr, decoded
 
 
 def parse_ldir_records(payload: bytes, key_length: int
@@ -667,22 +682,31 @@ def parse_ldir_records(payload: bytes, key_length: int
 # --- LEAF page cell decoder (delegated to lsm_cells) --------------------
 
 
-def parse_leaf(body: bytes) -> List[Tuple[bytes, bytes]]:
+def parse_leaf(body: bytes,
+               fixed_key_size: int = 0,
+               fixed_val_size: int = 0
+               ) -> List[Tuple[bytes, bytes]]:
     """Return decoded ``(key, value)`` pairs from a LEAF body.
 
-    .. warning::
+    The owning tree's ``fixed_key_size`` / ``fixed_val_size`` (from the
+    L-SB superblock at offsets +0x10 / +0x14) must be supplied so the
+    decoder knows whether to use the *compact* fixed-stride layout or
+    the *variable* (leb128 + bytes) layout.  Pass both as ``0`` for
+    a variable-length tree (e.g. ``tlv3`` / name-map).
 
-       The cell-payload decoder is **not yet implemented**; that work
-       lives in the companion module :mod:`tibread.tibx.lsm_cells`.
-       Until that lands, this function returns the LZ4-decompressed
-       cell area as a single opaque entry so callers can drive
-       end-to-end pipelines without crashing.
+    Tombstone cells (deletes) are returned with an empty ``value``;
+    callers that need to distinguish them should use
+    :func:`tibread.tibx.lsm_cells.decode_page_cells` directly, which
+    preserves the ``alive`` bit on every :class:`~tibread.tibx.lsm_cells.LsmCell`.
     """
-    hdr, decoded = decode_lsm_page_payload(body)
-    placeholder_key = bytes(
-        [hdr.encoding, 0x00, *hdr.magic, *struct.pack(">I", hdr.u_len)]
+    from .lsm_cells import decode_page_cells
+
+    _hdr, cells = decode_page_cells(
+        body,
+        fixed_key_size=fixed_key_size,
+        fixed_val_size=fixed_val_size,
     )
-    return [(placeholder_key, decoded)]
+    return [(c.key, c.value) for c in cells]
 
 
 # --- Tree walker --------------------------------------------------------
@@ -791,36 +815,60 @@ def walk_lsm_region(reader, start_page: int, end_page: int) -> LsmWalkStats:
     return stats
 
 
-def walk_lsm_tree(reader, root_page: int, max_pages: int = 4096
+def walk_lsm_tree(reader, root_page: int,
+                  key_length: int = 31,
+                  value_length: int = 10,
+                  max_pages: int = 4096
                   ) -> Iterator[Tuple[bytes, bytes]]:
-    """Yield ``(key, value)`` pairs from the LSM tree rooted at ``root_page``.
+    """Yield ``(key, value)`` pairs from every LEAF reachable from ``root_page``.
 
-    Currently this only descends through LDIR/LEAF pages and yields the
-    placeholder entries from :func:`parse_leaf` (the cell decoder is
-    in ``lsm_cells``). Useful as a smoke test that pages decompress
-    cleanly along the leftmost path.
+    Performs a full in-order walk of the LSM tree: descends every LDIR
+    branch (depth-first, leftmost first) and yields the cells of every
+    LEAF along the way.  The ``key_length`` and ``value_length`` must
+    match the owning tree's L-SB ``key_length`` / ``value_length``
+    fields; defaults are ``data_map``'s ``(31, 10)``.
+
+    Tombstone cells (deletes) are yielded with an empty bytes value.
     """
-    pages_walked = 0
-    cur_page = root_page
-    while pages_walked < max_pages and 0 <= cur_page < reader.page_count:
-        page_type, body = reader.read_page(cur_page, validate_crc=False)
+    pages_walked = [0]
+
+    def _visit(page_idx: int) -> Iterator[Tuple[bytes, bytes]]:
+        if pages_walked[0] >= max_pages:
+            return
+        if not (0 <= page_idx < reader.page_count):
+            return
+        pages_walked[0] += 1
+        page_type, body = reader.read_page(page_idx, validate_crc=False)
         if page_type == PAGE_TYPE_LDIR:
-            try:
-                hdr, payload = decode_lsm_page_payload(body)
-            except Exception:
-                break
-            # Need key_length to slice; default to 31 if unknown
-            # (data_map's key length, the most common in practice).
-            recs = parse_ldir_records(payload, 31)
-            if not recs:
-                break
-            cur_page = recs[0][1] // PAGE_SIZE
-            pages_walked += 1
+            _, payload = decode_lsm_page_payload(body)
+            for _key, child_off in parse_ldir_records(payload, key_length):
+                yield from _visit(child_off // PAGE_SIZE)
+        elif page_type == PAGE_TYPE_LEAF:
+            yield from parse_leaf(body, key_length, value_length)
+        # any other type is silently skipped
+
+    yield from _visit(root_page)
+
+
+def iter_tree_entries(reader, sb: "LsmSuperblock",
+                      max_pages: int = 8192
+                      ) -> Iterator[Tuple[bytes, bytes]]:
+    """Yield every on-disk ``(key, value)`` for ``sb``'s primary ctree.
+
+    Convenience wrapper that pulls ``key_length``/``value_length`` from
+    the L-SB superblock and walks each populated ctree.  Tombstone cells
+    are yielded with an empty bytes value.
+    """
+    for ctree in sb.ctrees:
+        if ctree.offset is None or ctree.root_page is None:
             continue
-        if page_type == PAGE_TYPE_LEAF:
-            yield from parse_leaf(body)
-            break
-        break
+        yield from walk_lsm_tree(
+            reader,
+            root_page=ctree.root_page,
+            key_length=sb.key_length,
+            value_length=sb.value_length,
+            max_pages=max_pages,
+        )
 
 
 __all__ = [
@@ -835,6 +883,8 @@ __all__ = [
     "LEAF_LZ4_PREAMBLE_LEN",
     "LEAF_PAYLOAD_OFFSET_LZ4",
     "TLV_TREE_NAMES",
+    "TLV_TREE_NAMES_INTERNAL",
+    "TLV_ARCH_OFFSET",
     "CTreeRef",
     "LsmSuperblock",
     "LsmPageHeader",
@@ -856,4 +906,5 @@ __all__ = [
     "walk_ctree",
     "walk_lsm_region",
     "walk_lsm_tree",
+    "iter_tree_entries",
 ]
