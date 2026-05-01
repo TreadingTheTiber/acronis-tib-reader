@@ -73,6 +73,15 @@ from .chains import (
     slice_type_from_flags,
     walk_chain_from_uuid,
 )
+from .data_map import (
+    DataMapKey,
+    DataMapValue,
+    DataMapEntry,
+    decode_key,
+    decode_value,
+    load_extents,
+    lookup_le,
+)
 
 __all__ = [
     "TibxReader",
@@ -130,4 +139,12 @@ __all__ = [
     "slice_features",
     "slice_type_from_flags",
     "walk_chain_from_uuid",
+    # data_map (TLV[1]) extent index (data_map.py)
+    "DataMapKey",
+    "DataMapValue",
+    "DataMapEntry",
+    "decode_key",
+    "decode_value",
+    "load_extents",
+    "lookup_le",
 ]
