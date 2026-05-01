@@ -136,7 +136,7 @@ class CliExitCodeTests(unittest.TestCase):
         result = _run_cli("--version")
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         # argparse prints `--version` output to stdout.
-        self.assertIn("tibread 0.1.0", result.stdout)
+        self.assertIn("tibread 0.2.0", result.stdout)
 
     def test_help_flag_exits_zero(self):
         result = _run_cli("--help")
@@ -206,7 +206,7 @@ class PackageImportTests(unittest.TestCase):
 
     def test_version_string(self):
         import tibread
-        self.assertEqual(tibread.__version__, "0.1.0")
+        self.assertEqual(tibread.__version__, "0.2.0")
 
 
 # ---------------------------------------------------------------------------
