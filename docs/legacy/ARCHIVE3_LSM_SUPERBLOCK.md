@@ -58,28 +58,30 @@ The TLV directory parser
 of `{void* payload, uint32_t length}`. The archive opener
 `FUN_1800155d0` then calls `lsm_sb_read` once per slot 0..7 (and once
 on slot 8 if header version ≥ 7), passing the inline TLV payload
-pointer. Mapping (`[CONFIRMED]` from the opener):
+pointer.
 
-| TLV slot | Tree              | Stored at archive struct offset      | Key size | Value size |
-|---------:|-------------------|---------------------------------------|----------|------------|
-| 0        | `lsm` (meta)      | `arch+0x1078`                         | 0        | 0 (recursive) |
-| 1        | `data_map` (dmap) | `arch+0x1088` (`archive_get_data_map`)| **31**   | **10**     |
-| 2        | `segment_map`     | `arch+0x1090`                         | **8**    | **32**     |
-| 3        | (unidentified, `key=9`, `val=0`) | `arch+0x10e8`              | 9        | 0          |
-| 4        | `dedup_map`       | `arch+0x10a8`                         | (empty)  | (empty)    |
-| 5        | `nlink_map`       | `arch+0x10b8`                         | **4**    | **132**    |
-| 6        | `slices`          | `arch+0x10f8`                         | **20**   | 0          |
-| 7        | `umap`            | `arch+0x12a8`                         | (empty)  | (empty)    |
-| 8        | `notary` (v7+)    | `arch+0x12b0`                         | (special)| (special)  |
+> **Canonical TLV index ↔ arch-offset ↔ tree-name mapping lives in
+> `ARCHIVE3_TLV_DIRECTORY.md`.** The earlier mapping table in this
+> document was wrong on slots 3..7 — refer to the canonical doc for
+> the corrected names. The list below is preserved for the *schema
+> bytes* (key/value sizes) only; the *names* may differ from the
+> canonical doc (e.g. this document's old TLV[5]=`nlink_map` is
+> actually TLV[5]=`smap`/slices).
 
-Note: the previous `ARCHIVE3_TLV_DIRECTORY.md` labelled TLV[1] as
-`items` and TLV[2] as `dmap`. The empirical schema bytes (key=31, val=10
-on TLV[1]) plus the runtime call `archive_get_data_map → arch+0x1088
-← TLV[1]` clearly identify TLV[1] as `data_map` and TLV[2] as
-`segment_map`. The header-dumper at `FUN_180013730` uses inverted
-labels — likely a historical mislabelling in the dumper that the
-loader does not propagate. The archive opener (loader) is authoritative
-here.
+Schema bytes (key/value sizes) per TLV slot, empirically validated on
+`Jmicron 0102.tibx` (header v8):
+
+| TLV slot | Canonical name (per `ARCHIVE3_TLV_DIRECTORY.md`) | Key size | Value size |
+|---------:|--------------------------------------------------|----------|------------|
+| 0        | `imap` / `lsm` (meta)                            | 0        | 0 (recursive) |
+| 1        | `dmap` / `data_map`                              | **31**   | **10**     |
+| 2        | `segment_map`                                    | **8**    | **32**     |
+| 3        | `dedup_map`                                      | **9**    | **0**      |
+| 4        | `nlink_map`                                      | **≥12**  | **132**    |
+| 5        | `smap` / `slices`                                | **4**    | **132**    |
+| 6        | `umap`                                           | **20**   | **0**      |
+| 7        | `keymap`                                         | (empty)  | (empty)    |
+| 8        | `notary` (v7+)                                   | (special)| (special)  |
 
 ## L-SB byte layout
 
@@ -125,21 +127,21 @@ level 1 is the residual `memtree_extra_payload`). Layout per slot:
 ## Empirical L-SB dump (Jmicron 0102.tibx, latest ARCH page = 13347627)
 
 ```
-TLV[0]=lsm           ver=2 ctree_count=3 max=12 seq=0   key/val=0/0
+TLV[0]=imap (lsm)    ver=2 ctree_count=3 max=12 seq=0   key/val=0/0
                       mem-tree: 7 nodes, extra_len=314, pages_total=559
-TLV[1]=data_map      ver=2 ctree_count=5 max=12 seq=0x1b key=31 val=10
+TLV[1]=dmap (data_map) ver=2 ctree_count=5 max=12 seq=0x1b key=31 val=10
    ctree[2] root_page=0xcba92b000 (page 13347115) num=0x1a2000 cnt=27   max=0x19eb5
    ctree[3] EMPTY
    ctree[4] root_page=0x92026a000 (page 9568874)  num=0x421000 cnt=18   max=0x3f025
 TLV[2]=segment_map   ver=2 ctree_count=5 seq=0x1a       key=8  val=32
    ctree[2] root_page=0xcbaacc000 (page 13347532) cnt=26
    ctree[4] root_page=0xb24991000 (page 11684241) cnt=23
-TLV[3]=??? key=9     ver=2 ctree_count=4 seq=0xa
+TLV[3]=dedup_map     ver=2 ctree_count=4 seq=0xa key=9 val=0
    ctree[2] root_page=0xcbab14000 (page 13347604) cnt=10
    ctree[3] root_page=0xb6ea89000 (page 11987593) cnt=8
-TLV[5]=nlink_map     ver=2 key=4 val=132   mem-tree only (2 nodes)
-TLV[6]=slices        ver=2 key=20 val=0    mem-tree (3 nodes) + ctree[2] root=0xcbab27000
-TLV[4]=dedup_map, TLV[7]=umap, TLV[8]=notary: all empty in this archive
+TLV[5]=smap (slices) ver=2 key=4 val=132   mem-tree only (2 nodes)
+TLV[6]=umap          ver=2 key=20 val=0    mem-tree (3 nodes) + ctree[2] root=0xcbab27000
+TLV[4]=nlink_map, TLV[7]=keymap, TLV[8]=notary: all empty in this archive
 ```
 
 ## LSM page envelope (page-types 0x03 = LEAF, 0x04 = LDIR)
@@ -259,7 +261,7 @@ Notes:
 
 `[CONFIRMED]` from individual `lsm_keyN_*`/`lsm_valN_*` decoders:
 
-### data_map (TLV[1]; arch+0x1088): key=31, value=10
+### data_map / `dmap` (TLV[1]; arch+0x1088): key=31, value=10
 
 `lsm_key2dmap_ext` (asserts key length = 0x1f):
 ```
@@ -280,7 +282,7 @@ Notes:
                                             (total = 10 bytes)
 ```
 
-### segment_map (TLV[2]; arch+0x10e8): key=8, value=32
+### segment_map (TLV[2]; arch+0x1090): key=8, value=32
 
 `lsm_key2segment_id` (asserts key=8): plain `BE u64 segment_id`.
 
@@ -297,38 +299,26 @@ Notes:
 The `lsm_val2segment_info` decompilation accesses bit-packed fields;
 exact semantics are deferred — but the on-disk record size is **32 B**.
 
-### TLV[3] (key=9, value=0)
+### TLV[3] = `dedup_map` (arch+0x10e8; key=9, value=0)
 
-Identity not yet decoder-confirmed. Empirical observations from
-`Jmicron 0102.tibx`:
+`[CONFIRMED]` Identity resolved during the consolidation pass: TLV[3] is
+the `dedup_map` tree. The post-header init `FUN_1800094a0` calls
+`dedup_map_create @ 0x1800411e0` which sets `param_2[6]=9; param_2[7]=0`
+(matching the empirical schema bytes), and stores the result at
+`arch+0x10e8`. The corresponding tree-name string at `0x1800979d8` is
+`"dedup_map"`. The earlier `name_map` hypothesis from the strings agent
+is **refuted** — the binary's own creator function names this slot
+`dedup_map`. See `ARCHIVE3_TLV_DIRECTORY.md` for full evidence.
+
+Empirical observations from `Jmicron 0102.tibx`:
 
 * Root LDIR at byte offset `0xcbab14000` decompresses to 1190 bytes
   (= 70 records of 9 + 8 = 17 bytes each).
 * The 70 keys are sorted lexicographically and span the full byte
-  range (first bytes 0x03..0xff, evenly distributed). This is
-  consistent with a hashed-name index, not a structured ID space.
-* No `lsm_key*` decoder in `archive3.dll` asserts `key_len == 9`.
+  range (first bytes 0x03..0xff, evenly distributed) — consistent
+  with hash-keyed dedup entries.
 
-The strings-agent inferred a `name_map` tree from string-table
-ordering (`data_map, name_map, segment_map, unused_map, nlink_map,
-notary_map`). Mapping that list onto the L-SB schema bytes:
-
-| Strings agent name | Our TLV slot | Schema (k/v) |
-|--------------------|--------------|--------------|
-| `data_map`         | TLV[1]       | 31 / 10 ✓    |
-| `name_map`         | TLV[3]       | 9 / 0 — likely |
-| `segment_map`      | TLV[2]       | 8 / 32 ✓     |
-| `unused_map`       | TLV[7]       | (= umap; empty) |
-| `nlink_map`        | TLV[5]       | 4 / 132 ✓    |
-| `notary_map`       | TLV[8]       | (notary, v7+) |
-
-So **TLV[3] is most plausibly `name_map`** — a filename-hash → ID
-inverted index. This is an inference, not a decoder confirmation.
-
-A `lsm_alloc_umap_key` symbol exists at 0x180053860 but its key length
-is 20 (matching TLV[6]/TLV[7], not TLV[3]).
-
-### nlink_map (TLV[5]; arch+0x10b8): key≥12, value=132
+### nlink_map (TLV[4]; arch+0x10a8): key≥12, value=132
 
 `lsm_key2link_key` (asserts key length ≥ 12):
 ```
@@ -340,19 +330,15 @@ is 20 (matching TLV[6]/TLV[7], not TLV[3]).
 Value (132 bytes) layout not yet decoded — likely a fixed-size inode/
 link record with name + attributes.
 
-### slices (TLV[6]; arch+0x10f8): key=20, value=0
+### slices / `smap` (TLV[5]; arch+0x10b8): key=4, value=132
 
-Key allocator `lsm_alloc_umap_key` (sic — labelled umap but used for
-slices? Actually it allocates a **20-byte umap key**, not slices).
-Slices' key=20 layout is similar but stored as record (no value):
-```
-+0x00  8   slice_id            BE u64
-+0x08  4   sub_id              BE u32 (top bit possibly used as flag)
-+0x0c  8   offset              BE u64
-+0x14  -   (key end)
-```
+`[CONFIRMED]` See `ARCHIVE3_CHAINS.md` for the byte-precise 132-byte
+slice record format and the `archive_slice_query` call chain that
+binds this tree to the `arch+0x10b8` (TLV[5]) slot. The internal
+C-source name in `FUN_1800094a0` is `"smap"` (slices map); the
+user-facing canonical alias is `slices`.
 
-### umap (TLV[7]; arch+0x12a8): key=20, value=0 (used-extent map)
+### umap (TLV[6]; arch+0x10f8): key=20, value=0 (used-extent map)
 
 `lsm_key2umap_ext` (asserts key=0x14):
 ```
@@ -364,14 +350,21 @@ Slices' key=20 layout is similar but stored as record (no value):
 
 Empty in the sample archive.
 
+### keymap (TLV[7]; arch+0x12a8)
+
+Encryption-key store. Empty in non-encrypted archives. The
+`FUN_1800094a0` post-header init creates this tree via the generic
+`lsm_create` with the name string `"keymap"` at `0x1800979ec`.
+
 ### items (no fixed-size lsm_item_init found)
 
-The "items" tree (originally TLV[1] per the dumper) probably collapses
-into a different physical slot. The dumper labels TLV[1]="items" but
-the **schema there is the data_map schema** (key=31, val=10) per
-`lsm_dmap_init` and the loader's wiring. Treat the dumper labels as
-historical / partly inverted; trust the loader and the empirical L-SB
-schema bytes.
+The "items" tree (the dumper at `FUN_180013730` labels TLV[1] as
+`"items"`) does **not** correspond to any tree-create call. The
+loader's wiring puts `data_map` (`dmap`, key=31, val=10) at
+`arch+0x1088 = TLV[1]`. Treat the dumper labels as historical /
+stale; trust the loader, the post-header init's tree-name strings,
+and the empirical L-SB schema bytes (per
+`ARCHIVE3_TLV_DIRECTORY.md`).
 
 ## Empirical validation
 
@@ -424,10 +417,8 @@ a SHA-like inner identifier. The 10-byte values look like
 
 * Exact per-record packing inside LEAF body (variable stride / presence
   bitmap) — companion agent's focus.
-* Identity of TLV[3] (key=9, val=0). Per the loader it lives at
-  `arch+0x10e8`, the same address used by the existing TLV doc for
-  `segment_map`. Resolve cross-doc inconsistency.
-* Dumper-vs-loader name inversion (TLV[1]/TLV[2]). Authoritative ID is
-  by L-SB schema bytes + loader struct offset, not dumper string.
 * Per-tree value layouts beyond field offsets (e.g., nlink_map's 132 B
   value, segment_map's 32 B record).
+
+(Identity of TLV[3] and the dumper-vs-loader name inversion are now
+**resolved** — see `ARCHIVE3_TLV_DIRECTORY.md`.)
