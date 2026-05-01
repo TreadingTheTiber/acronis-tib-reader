@@ -131,6 +131,7 @@ def cmd_extract_fs(args):
         args.tib, args.outdir,
         max_files=args.max_files,
         max_offset=args.max_bytes,
+        rename_to_original=args.rename_to_original,
         progress=True,
     )
     print(f"recovered {n} files into {args.outdir}")
@@ -884,6 +885,13 @@ def main(argv=None):
     ap.add_argument(
         "--max-bytes", type=int, default=None,
         help="Stop walking past this file offset (default: walk to EOF).",
+    )
+    ap.add_argument(
+        "--rename-to-original", action="store_true",
+        help="Use the original on-disk path (recovered from the .tib's "
+             "directory tree) as each file's output name, recreating "
+             "the directory structure under outdir. Default: numbered "
+             "`recovered_NNNNNN.ext` blobs.",
     )
     ap.set_defaults(func=cmd_extract_fs)
 

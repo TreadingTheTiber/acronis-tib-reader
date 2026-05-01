@@ -498,6 +498,7 @@ def _sniff_extension(content: bytes) -> str:
 def extract_files(tib_path: str, output_dir: str, *,
                   max_files: Optional[int] = None,
                   max_offset: Optional[int] = None,
+                  rename_to_original: bool = False,
                   progress: bool = False) -> int:
     """Walk the FS-mode body and write each logical file as a numbered
     blob in ``output_dir``. Returns the count of files emitted.
@@ -524,6 +525,25 @@ def extract_files(tib_path: str, output_dir: str, *,
 
     os.makedirs(output_dir, exist_ok=True)
 
+    # Try to recover the original-filename directory tree. This is best-
+    # effort: if the trailer region is missing or malformed, we fall back
+    # to numbered output. Paths are paired with recovered files by tree
+    # order (which empirically matches the file-stream order).
+    original_paths: list = []
+    try:
+        _meta_blob, tree_blob = decode_directory_tree(tib_path)
+        original_paths = [
+            p for p in extract_paths_from_tree(tree_blob)
+            if is_likely_file_path(p)
+        ]
+        if progress:
+            print(f"[tibread] recovered {len(original_paths):,} original "
+                  f"file paths from directory tree", flush=True)
+    except Exception as e:
+        if progress:
+            print(f"[tibread] directory-tree decode failed ({e}); "
+                  f"original filenames unavailable", flush=True)
+
     # Track every emitted file so we can post-annotate them once the
     # corresponding f-batch arrives.
     @dataclass
@@ -533,6 +553,7 @@ def extract_files(tib_path: str, output_dir: str, *,
         size: int
         md5: bytes
         meta: Optional[FsFileMetadata] = None
+        original_path: Optional[str] = None
 
     emitted: list = []
     cur_chunks: list = []
@@ -551,17 +572,32 @@ def extract_files(tib_path: str, output_dir: str, *,
         content = b"".join(cur_chunks)
         ext = _sniff_extension(content)
         file_count += 1
-        out_path = os.path.join(
-            output_dir, f"recovered_{file_count:06d}.{ext}"
-        )
+        # Pair with an original path if available (by stream order).
+        orig_path = (original_paths[file_count - 1]
+                     if file_count - 1 < len(original_paths) else None)
+        if rename_to_original and orig_path:
+            # Sanitize: strip drive letter, replace separators, drop
+            # leading slashes. Keep directory structure under output_dir.
+            sane = orig_path
+            if len(sane) >= 2 and sane[1] == ":":
+                sane = sane[2:]
+            sane = sane.replace("\\", "/").lstrip("/")
+            full_out = os.path.join(output_dir, sane)
+            os.makedirs(os.path.dirname(full_out), exist_ok=True)
+            out_path = full_out
+        else:
+            out_path = os.path.join(
+                output_dir, f"recovered_{file_count:06d}.{ext}"
+            )
         with open(out_path, "wb") as out:
             out.write(content)
         total_bytes += len(content)
         emitted.append(_EmittedFile(
             index=file_count,
-            path=os.path.basename(out_path),
+            path=os.path.relpath(out_path, output_dir),
             size=len(content),
             md5=hashlib.md5(content).digest(),
+            original_path=orig_path,
         ))
         cur_chunks.clear()
 
@@ -616,6 +652,7 @@ def extract_files(tib_path: str, output_dir: str, *,
             side.write(json.dumps({
                 "file_index": ef.index,
                 "output": ef.path,
+                "original_path": ef.original_path,
                 "size": ef.size,
                 "md5": ef.md5.hex(),
                 "expected_size": m.file_size if m else None,
@@ -640,6 +677,192 @@ def extract_files(tib_path: str, output_dir: str, *,
     return file_count
 
 
+# ---------------------------------------------------------------------------
+# Directory tree (filename) recovery
+# ---------------------------------------------------------------------------
+#
+# The post-content tail of an FS-mode hybrid `.tib` carries a directory
+# tree that maps every file in the archive to its original path. The
+# region is **plaintext** (was thought encrypted; isn't): a chain of
+# raw-deflate streams ending with a self-locating 16-byte tail.
+#
+# Layout (verified empirically against `share_backup_example.tib`):
+#
+#   [last m/n record's zlib end]
+#   [f-batch: N×(44 B preamble + raw-deflate metadata blob)]
+#   [u8 0x65='e'][raw deflate -> ~1360 B metadata-blob TLV (metainfo XML, productinfo)]
+#   [5 bytes framing: c0 83 c7 05 67]
+#   [raw deflate -> ~59 MB directory tree (one record per file/folder)]
+#   [11 bytes — likely CRC32 + u64 record count]
+#   [raw deflate -> ~5 B (walker artifact)]
+#   [u64 record_count][u64 body-relative offset of the 0x65 byte]
+#   [u32 trailer magic 0x94E18A2C]
+#
+# Per-record format inside the directory tree (empirical, not yet fully
+# field-named):
+#
+#   u32  record_count           (only at offset 0 of the stream)
+#   --- per record (variable size, ~50-300 bytes) ---
+#   u32  fullpath_chars         (UTF-16-LE characters, then 2*chars bytes)
+#   u8[2*chars] fullpath_utf16
+#   u32  basename_chars
+#   u8[2*chars] basename_utf16
+#   u32  basename_chars         (yes, repeats — second copy might be a
+#                                "case-sensitive name" cache)
+#   u8[2*chars] basename_utf16
+#   u32  shortname_chars        (8.3-form, ALL CAPS)
+#   u8[2*chars] shortname_utf16
+#   ...~40-60 B fixed fields: NTFS file_id (u64), parent_id, FILETIMEs,
+#       attribute flags, two repeated FILETIMEs (create/modify) ...
+#
+# We don't yet name every field of the fixed section, but the path
+# strings recover correctly from a simple UTF-16 scan.
+
+# Magic byte sequence the directory-tree blob starts with.
+DIRTREE_TYPE_BYTE = 0x65        # 'e'
+DIRTREE_FRAMING = bytes.fromhex("c083c70567")  # 5 bytes between metadata-blob
+                                                # and tree streams
+
+
+def _read_footer(tib_path: str) -> Tuple[int, int]:
+    """Return (concat_end, slice_size) by reading the 48-byte footer."""
+    import struct
+    file_size = os.path.getsize(tib_path)
+    with open(tib_path, "rb") as f:
+        f.seek(file_size - 48)
+        footer = f.read(48)
+    if len(footer) != 48:
+        raise ValueError(f"file too small to have a footer: {file_size} bytes")
+    slice_size = struct.unpack_from("<Q", footer, 8)[0]
+    concat_end = DATA_START + slice_size
+    return concat_end, slice_size
+
+
+def locate_directory_tree(tib_path: str) -> Tuple[int, int]:
+    """Find the directory-tree blob's start/end file offsets.
+
+    Returns (start_offset, end_offset) where ``[start, end)`` brackets
+    the bytes from the type-byte ``0x65`` through to (but not including)
+    the 4-byte trailer magic.
+
+    The locator is the 16-byte struct immediately preceding the trailer:
+        [u64 record_count][u64 body_relative_offset]
+    where ``body_relative_offset = start_offset - DATA_START``.
+    """
+    import struct
+    concat_end, _slice_size = _read_footer(tib_path)
+    if concat_end < 32:
+        raise ValueError(f"implausibly small concat_end: {concat_end}")
+    with open(tib_path, "rb") as f:
+        # The 16-byte locator sits at concat_end - 4 - 16.
+        f.seek(concat_end - 4 - 16)
+        locator = f.read(16)
+    if len(locator) != 16:
+        raise ValueError("could not read 16-byte locator")
+    record_count = struct.unpack_from("<Q", locator, 0)[0]
+    body_rel_off = struct.unpack_from("<Q", locator, 8)[0]
+    start = DATA_START + body_rel_off
+    end = concat_end - 4
+    if not (DATA_START < start < end):
+        raise ValueError(
+            f"implausible locator: start={start} end={end} record_count={record_count}"
+        )
+    return start, end
+
+
+def decode_directory_tree(tib_path: str) -> Tuple[bytes, bytes]:
+    """Decode the trailing-region streams. Returns (metadata_blob, dir_tree)
+    where ``metadata_blob`` is the ~1.3 KB TLV (metainfo XML, productinfo
+    etc.) and ``dir_tree`` is the ~tens-of-MB directory-tree raw blob.
+
+    Raises ValueError if the streams don't decode cleanly.
+    """
+    start, end = locate_directory_tree(tib_path)
+    # Read the whole opaque region (sub-MB to tens of MB).
+    with open(tib_path, "rb") as f:
+        f.seek(start)
+        region = f.read(end - start)
+
+    if not region or region[0] != DIRTREE_TYPE_BYTE:
+        raise ValueError(
+            f"directory-tree region doesn't start with 0x65 ('e'); "
+            f"got {region[:1].hex() if region else '<empty>'}"
+        )
+
+    # Stream 1: metadata blob, raw deflate at +1.
+    d1 = zlib.decompressobj(-15)
+    meta_blob = d1.decompress(region[1:])
+    if not d1.eof:
+        # Try to feed remainder
+        meta_blob += d1.flush()
+    consumed1 = len(region) - 1 - len(d1.unused_data)
+    after1 = 1 + consumed1
+
+    # 5-byte framing then stream 2: directory tree, raw deflate.
+    frame_end = after1 + len(DIRTREE_FRAMING)
+    if region[after1:frame_end] != DIRTREE_FRAMING:
+        # Some samples may have a slightly different framing — fall back
+        # to scanning forward for the next inflate-able raw-deflate
+        # stream within the next 64 bytes.
+        for skip in range(1, 64):
+            d2 = zlib.decompressobj(-15)
+            try:
+                tree = d2.decompress(region[after1 + skip:])
+                if d2.eof:
+                    return meta_blob, tree
+            except zlib.error:
+                continue
+        raise ValueError(
+            f"unexpected framing at +{after1:#x}: "
+            f"{region[after1:after1+8].hex()}"
+        )
+    d2 = zlib.decompressobj(-15)
+    tree = d2.decompress(region[frame_end:])
+    if not d2.eof:
+        tree += d2.flush()
+    return meta_blob, tree
+
+
+def extract_paths_from_tree(tree_blob: bytes) -> list:
+    """Extract every UTF-16-LE path string from the directory-tree blob
+    that contains a path separator (``/`` or ``\\``).
+
+    This is a heuristic scan, not a full record parser — the per-record
+    structure has fixed-field segments we haven't fully labelled. Each
+    record contains 4 strings (fullpath, basename, basename-cache,
+    shortname); only the fullpath has a separator, so filtering by
+    separator de-dupes to one entry per file/folder.
+
+    The returned list is in **on-disk order** — index 0 is the first
+    record in the tree.
+    """
+    import re
+    # UTF-16-LE printable run, length >= 3 chars (6 bytes).
+    pattern = re.compile(rb"(?:[\x20-\x7e]\x00){3,}")
+    paths = []
+    for m in pattern.finditer(tree_blob):
+        s = m.group().decode("utf-16-le", errors="ignore")
+        if "/" in s or "\\" in s:
+            paths.append(s)
+    return paths
+
+
+def is_likely_file_path(path: str) -> bool:
+    """Heuristic: distinguish a file from a directory by extension shape.
+
+    Returns True if the path's basename has an extension of 1-5 chars
+    that looks plausible (alphanumeric only). Empty/missing extensions
+    suggest a directory.
+    """
+    base = path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    if "." not in base:
+        return False
+    ext = base.rsplit(".", 1)[-1]
+    if not (1 <= len(ext) <= 5):
+        return False
+    return ext.replace("_", "").replace("-", "").isalnum()
+
+
 __all__ = [
     "DATA_START",
     "TYPE_FILE_CHUNK",
@@ -647,6 +870,7 @@ __all__ = [
     "TYPE_DIR_RECORD",
     "META_PREAMBLE_LEN",
     "META_BLOB_MAGIC",
+    "DIRTREE_TYPE_BYTE",
     "FsRecord",
     "FsExtent",
     "FsFileMetadata",
@@ -654,4 +878,7 @@ __all__ = [
     "is_fs_mode_hybrid",
     "extract_files",
     "parse_metadata_batch",
+    "locate_directory_tree",
+    "decode_directory_tree",
+    "extract_paths_from_tree",
 ]
