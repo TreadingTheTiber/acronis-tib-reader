@@ -385,6 +385,105 @@ def cmd_tibx_verify(args):
         return 0 if bad == 0 else 1
 
 
+def cmd_tibx_mount(args):
+    """Bootstrap an :class:`NtfsVolume` against a ``.tibx`` archive.
+
+    Currently only the first 256 KiB of the source disk is reachable
+    (the bootstrap segment); reads beyond that fail with
+    :class:`ChunkMapNotImplemented` until the segment_map LSM-tree cell
+    decoder lands.  This subcommand reports what works (MBR / partition
+    table / BPB-if-in-range) and what doesn't, so the plumbing is ready
+    to flip on once the LSM walker arrives.
+    """
+    from .tibx import TibxDiskAdapter
+    from .tibx.disk_image import BOOTSTRAP_LEN, ChunkMapNotImplemented
+    from .ntfs import NtfsVolume
+
+    print(f"tibx file: {args.tibx}")
+
+    with TibxDiskAdapter(args.tibx) as adapter:
+        try:
+            mbr = adapter.read(0, 512)
+        except Exception as e:
+            print(f"  MBR read failed: {type(e).__name__}: {e}")
+            return 1
+        sig_ok = mbr[510:512] == b"\x55\xaa"
+        print(f"  MBR signature  : {'OK (0x55AA)' if sig_ok else 'MISSING'}")
+        print(f"  partition_size : {adapter.partition_size:,} bytes")
+        print(f"  block_count    : {adapter.block_count:,} (4 KiB blocks)")
+
+        partitions = adapter.list_mbr_partitions()
+        if partitions:
+            print(f"  MBR partitions ({len(partitions)}):")
+            for i, p in enumerate(partitions):
+                in_boot = p["byte_offset"] < BOOTSTRAP_LEN
+                marker = "  <-- BPB in bootstrap" if in_boot else ""
+                print(
+                    f"    #{i}: type=0x{p['type']:02x} "
+                    f"first_lba={p['first_lba']:,}  "
+                    f"size={p['byte_size']:,} bytes "
+                    f"({p['byte_size'] / 1024**3:.2f} GiB){marker}"
+                )
+
+    print()
+    print("Attempting NtfsVolume bootstrap on each MBR partition:")
+    if not partitions:
+        print("  no MBR partitions found; skipping NTFS probe")
+        return 0
+    for i, p in enumerate(partitions):
+        print(f"  partition #{i} (offset {p['byte_offset']:,}):")
+        if p["byte_offset"] >= BOOTSTRAP_LEN:
+            print(
+                f"    boot sector at byte {p['byte_offset']:,} is past the "
+                f"bootstrap region (0..{BOOTSTRAP_LEN}); cannot read BPB "
+                f"until the segment_map LSM walker lands."
+            )
+            continue
+        padapter = TibxDiskAdapter(args.tibx, partition_offset=p["byte_offset"])
+        try:
+            try:
+                vol = NtfsVolume(padapter, build_index=False)
+            except ChunkMapNotImplemented:
+                print(
+                    f"    BPB parsed; $MFT read NOT YET POSSIBLE "
+                    f"(LSM walker required)"
+                )
+                tmp = NtfsVolume.__new__(NtfsVolume)
+                tmp.disk = padapter
+                try:
+                    tmp._parse_boot_sector()
+                    print(
+                        f"    BPB: bytes_per_sector={tmp.bytes_per_sector} "
+                        f"sectors_per_cluster={tmp.sectors_per_cluster} "
+                        f"cluster_size={tmp.cluster_size}"
+                    )
+                    print(
+                        f"         total_sectors={tmp.total_sectors:,} "
+                        f"mft_lcn={tmp.mft_lcn:,} mftmirr_lcn={tmp.mftmirr_lcn:,}"
+                    )
+                    print(
+                        f"         mft_record_size={tmp.mft_record_size} "
+                        f"index_record_size={tmp.index_record_size}"
+                    )
+                    if tmp.oem_warning:
+                        print(f"         OEM warning: {tmp.oem_warning}")
+                    print(
+                        f"    $MFT byte offset = "
+                        f"{tmp.mft_lcn * tmp.cluster_size:,} on partition; "
+                        f"reading it requires LSM walker."
+                    )
+                except Exception as e2:
+                    print(f"    BPB parse failed: {type(e2).__name__}: {e2}")
+            except Exception as e:
+                print(f"    BPB parse FAILED: {type(e).__name__}: {e}")
+            else:
+                total = vol._mft_real_size // vol.mft_record_size
+                print(f"    NtfsVolume bootstrap SUCCESS: {total:,} MFT records")
+        finally:
+            padapter.close()
+    return 0
+
+
 def cmd_mount(args):
     try:
         from .mount.fuse import fuse_mount
@@ -477,6 +576,13 @@ def main(argv=None):
              "may take several minutes.",
     )
     ap.set_defaults(func=cmd_tibx_verify)
+
+    ap = sub.add_parser(
+        "tibx-mount",
+        help="Bootstrap NtfsVolume against a .tibx file [experimental].",
+    )
+    ap.add_argument("tibx")
+    ap.set_defaults(func=cmd_tibx_mount)
 
     ap = sub.add_parser("mount", help="Mount the .tib's NTFS volume read-only.")
     ap.add_argument("tib")

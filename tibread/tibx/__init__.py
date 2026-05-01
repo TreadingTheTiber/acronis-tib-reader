@@ -37,6 +37,7 @@ from .disk_image import (
     ChunkMapNotImplemented,
     read_lba_range,
 )
+from .disk_adapter import TibxDiskAdapter, TibxAdapterError
 from .lsm import (
     ArchiveHeader,
     CTreeRef,
@@ -65,6 +66,8 @@ __all__ = [
     "BOOTSTRAP_LEN",
     "ChunkMapNotImplemented",
     "read_lba_range",
+    "TibxDiskAdapter",
+    "TibxAdapterError",
     "compute_page_crc32",
     "crc32c",
     "PAGE_SIZE",
