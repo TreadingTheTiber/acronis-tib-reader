@@ -309,7 +309,21 @@ def parse_metadata_batch(batch_bytes: bytes) -> list:
 
 def _consume_zlib(f, max_extra: int = 16 << 20) -> Tuple[int, bytes]:
     """Inflate the zlib stream at the file's current position, returning
-    (compressed_length, decompressed_bytes)."""
+    (compressed_length, decompressed_bytes).
+
+    Note on intermittent off-by-1 results
+    -------------------------------------
+    Some `m`-record chunks in the reference NAS_Backup archive (5 out of
+    ~100 sampled files) inflate to **exactly 1 byte less** than the
+    corresponding metadata's expected size. Investigation (RE Agent 3,
+    2026-05-01) confirmed these are not parser bugs: the on-disk
+    final-stored-block header carries ``LEN=3`` instead of ``LEN=4``,
+    AND the chunk's Adler32 checksum validates the truncated payload.
+    Acronis 2016's chunker emitted those chunks short. JPEGs in those
+    files still decode (valid ``FF D9`` EOI), so the recovered content
+    is usable; treat ``size_ok: false`` with a -1 difference as a
+    diagnostic of writer-side weirdness, not a reader bug.
+    """
     d = zlib.decompressobj()
     out = bytearray()
     consumed = 0
