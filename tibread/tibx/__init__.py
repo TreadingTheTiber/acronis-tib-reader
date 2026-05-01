@@ -27,8 +27,14 @@ from .format import (
     PAGE_TYPE_LDIR,
     PAGE_TYPE_LSM5,
     PAGE_TYPE_DATA,
+    META_KEYS_MAX,
+    META_KEY_NAMES,
+    VolumeTableEntry,
     compute_page_crc32,
     crc32c,
+    parse_meta_keys,
+    parse_meta_keys_dict,
+    parse_volume_table,
 )
 from .reader import TibxReader, TibxPageCrcError
 from .segment import SgSegment, decompress_segment, parse_sg_header
@@ -79,6 +85,13 @@ __all__ = [
     "PAGE_TYPE_LDIR",
     "PAGE_TYPE_LSM5",
     "PAGE_TYPE_DATA",
+    # TLV[9] meta_keys + TLV[18] volume_table (format.py)
+    "META_KEYS_MAX",
+    "META_KEY_NAMES",
+    "VolumeTableEntry",
+    "parse_meta_keys",
+    "parse_meta_keys_dict",
+    "parse_volume_table",
     # LSM tree parser (lsm.py)
     "ArchiveHeader",
     "CTreeRef",

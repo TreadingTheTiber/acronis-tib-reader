@@ -12,6 +12,7 @@ Subcommands:
   tib tibx-stat <tibx>                 Show detailed .tibx LSM-tree status (per-tree ctree summary).
   tib tibx-verify <tibx>               Validate every page's CRC-32C; report mismatches.
   tib tibx-mount <tibx>                Probe NTFS via .tibx-backed disk adapter [experimental].
+  tib tibx-volumes <tibx>              Show .tibx volume_table (TLV[18]) cross-checked vs. MBR.
 
 Examples:
   tib info backup_full_b1_s1_v1.tib
@@ -484,6 +485,161 @@ def cmd_tibx_mount(args):
     return 0
 
 
+_MBR_PARTITION_TYPE_NAMES = {
+    0x00: "empty",
+    0x01: "FAT12",
+    0x04: "FAT16 (<32 MB)",
+    0x05: "extended (CHS)",
+    0x06: "FAT16",
+    0x07: "NTFS / exFAT / IFS",
+    0x0b: "FAT32 (CHS)",
+    0x0c: "FAT32 (LBA)",
+    0x0e: "FAT16 (LBA)",
+    0x0f: "extended (LBA)",
+    0x11: "hidden FAT12",
+    0x14: "hidden FAT16 (<32 MB)",
+    0x16: "hidden FAT16",
+    0x17: "hidden NTFS",
+    0x1b: "hidden FAT32 (CHS)",
+    0x1c: "hidden FAT32 (LBA)",
+    0x27: "Windows RE / hidden NTFS",
+    0x82: "Linux swap",
+    0x83: "Linux",
+    0x8e: "Linux LVM",
+    0xa5: "FreeBSD",
+    0xa8: "macOS UFS",
+    0xaf: "macOS HFS+",
+    0xee: "GPT protective",
+    0xef: "EFI System (MBR)",
+    0xfb: "VMware VMFS",
+}
+
+
+def cmd_tibx_volumes(args):
+    """Decode and print the .tibx archive's TLV[18] volume_table.
+
+    The volume_table is the per-archive list of source-disk volumes
+    (see ``ARCHIVE3_TLV_DIRECTORY.md``). Each record carries a
+    ``(volume_index, source_disk_byte_offset)`` pair. We additionally
+    decode the source-disk MBR (LBA 0) and print the matching MBR
+    partition info next to each volume so the user can see which
+    file-system is at each offset.
+
+    Also prints the TLV[9] meta_keys payload as a key/value table —
+    these are the archive-level metadata strings (``type``,
+    ``disk_guid``, ``hostname``, ``agent_build``, ``install_guid``)
+    parallel to the in-binary ``ar_meta_keys`` table.
+    """
+    from .tibx import (
+        TibxReader,
+        TibxDiskAdapter,
+        parse_meta_keys,
+        parse_meta_keys_dict,
+        parse_volume_table,
+        read_archive_header,
+    )
+    from .tibx.format import META_KEY_NAMES
+
+    print(f"tibx file: {args.tibx}")
+    with TibxReader(args.tibx) as r:
+        hdr = read_archive_header(r)
+        s9 = hdr.tlv[9].payload if len(hdr.tlv) > 9 else b""
+        s18 = hdr.tlv[18].payload if len(hdr.tlv) > 18 else b""
+
+        # ---- TLV[9] meta_keys ----
+        print()
+        print(f"TLV[9] meta_keys ({len(s9)} bytes):")
+        slots = parse_meta_keys(s9)
+        for i, val in enumerate(slots):
+            name = META_KEY_NAMES[i] if i < len(META_KEY_NAMES) and META_KEY_NAMES[i] else "?"
+            shown = repr(val) if val else "(empty)"
+            print(f"  [{i:2d}] {name:14s} = {shown}")
+        kv = parse_meta_keys_dict(s9)
+        if kv:
+            print()
+            print("Identified meta keys:")
+            for k, v in kv.items():
+                print(f"  {k:14s} : {v}")
+
+        # ---- TLV[18] volume_table ----
+        print()
+        print(f"TLV[18] volume_table ({len(s18)} bytes, "
+              f"{len(s18) // 12} record(s)):")
+        entries = parse_volume_table(s18)
+        if not entries:
+            print("  (empty)")
+        else:
+            for e in entries:
+                print(f"  idx={e.idx}  byte_offset={e.byte_offset:,} "
+                      f"(0x{e.byte_offset:x})")
+
+        # ---- MBR cross-reference ----
+        # Read the MBR via the disk adapter (uses bootstrap region;
+        # always works for the first 256 KiB of the source disk).
+        try:
+            with TibxDiskAdapter(args.tibx) as adapter:
+                mbr_parts = adapter.list_mbr_partitions()
+        except Exception as e:
+            print()
+            print(f"  MBR read failed: {type(e).__name__}: {e}")
+            mbr_parts = []
+
+        print()
+        print(f"MBR partition table at LBA 0 ({len(mbr_parts)} non-empty entries):")
+        if not mbr_parts:
+            print("  (none — MBR signature missing or all entries empty)")
+        else:
+            for i, p in enumerate(mbr_parts):
+                tname = _MBR_PARTITION_TYPE_NAMES.get(p["type"], "?")
+                print(
+                    f"  MBR#{i}: type=0x{p['type']:02x} ({tname})  "
+                    f"first_lba={p['first_lba']:,}  "
+                    f"byte_offset={p['byte_offset']:,}  "
+                    f"size={p['byte_size']:,} bytes"
+                )
+
+        # ---- Cross-check ----
+        print()
+        if entries and mbr_parts:
+            print("Cross-reference (volume_table -> MBR partition):")
+            mbr_by_offset = {p["byte_offset"]: p for p in mbr_parts}
+            for e in entries:
+                p = mbr_by_offset.get(e.byte_offset)
+                if p is not None:
+                    tname = _MBR_PARTITION_TYPE_NAMES.get(p["type"], "?")
+                    print(
+                        f"  Volume {e.idx}: byte_offset={e.byte_offset:,} "
+                        f"-> MBR partition type=0x{p['type']:02x} ({tname}), "
+                        f"size={p['byte_size']:,} bytes"
+                    )
+                elif e.byte_offset == 0:
+                    if len(entries) == 1:
+                        # Whole-disk image: the single (0, 0) entry
+                        # represents the entire disk, not partition 0.
+                        total = sum(p["byte_size"] for p in mbr_parts)
+                        print(
+                            f"  Volume {e.idx}: byte_offset=0 -> "
+                            f"whole-disk image (covers all {len(mbr_parts)} "
+                            f"MBR partitions, total {total:,} bytes)"
+                        )
+                    else:
+                        print(
+                            f"  Volume {e.idx}: byte_offset=0 -> MBR LBA 0 "
+                            f"(disk start; not a partition)"
+                        )
+                else:
+                    print(
+                        f"  Volume {e.idx}: byte_offset={e.byte_offset:,} "
+                        f"-> NO matching MBR partition (off-table offset)"
+                    )
+        elif entries:
+            print("Cross-reference: no MBR — volume_table reported as-is.")
+        elif mbr_parts:
+            print("Cross-reference: volume_table empty; MBR has "
+                  f"{len(mbr_parts)} partitions (see above).")
+    return 0
+
+
 def cmd_mount(args):
     try:
         from .mount.fuse import fuse_mount
@@ -583,6 +739,14 @@ def main(argv=None):
     )
     ap.add_argument("tibx")
     ap.set_defaults(func=cmd_tibx_mount)
+
+    ap = sub.add_parser(
+        "tibx-volumes",
+        help="Show the .tibx volume_table (TLV[18]) and meta_keys "
+             "(TLV[9]), cross-referenced against the MBR.",
+    )
+    ap.add_argument("tibx")
+    ap.set_defaults(func=cmd_tibx_volumes)
 
     ap = sub.add_parser("mount", help="Mount the .tib's NTFS volume read-only.")
     ap.add_argument("tib")

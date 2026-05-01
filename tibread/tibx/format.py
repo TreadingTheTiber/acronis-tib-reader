@@ -32,6 +32,10 @@ that backs every constant in this module.
 
 from __future__ import annotations
 
+import struct
+from dataclasses import dataclass
+from typing import List
+
 # --- page envelope -------------------------------------------------------
 
 PAGE_SIZE = 4096
@@ -198,6 +202,134 @@ def read_stored_page_crc32(page: bytes) -> int:
     return int.from_bytes(page[4:8], "big")
 
 
+# --- TLV[9] meta_keys / TLV[18] volume_table ----------------------------
+
+# TLV[9] holds a fixed-position array of NUL-terminated UTF-8 strings,
+# parallel to the in-binary ``ar_meta_keys`` global table. Per the
+# decompilation of ``archive3.dll`` (loader ``FUN_1800155d0``) the
+# loader iterates the blob with ``memchr(.., 0, ..)`` and writes the
+# resulting strings into ``arch+0x1da8`` (a 20-entry table). Empty
+# slots (consecutive NUL bytes) represent meta-keys whose value is not
+# populated for this archive.  See ``ARCHIVE3_TLV_DIRECTORY.md``.
+META_KEYS_MAX = 20
+
+# Empirical positional → key-name mapping observed on
+# ``example.tibx`` (header_version=8). The slot indices line up
+# with ``ar_meta_keys``; positions where the test archive carries a
+# value give us the key name. Unobserved positions are left blank
+# until another sample archive populates them.
+META_KEY_NAMES: tuple[str, ...] = (
+    "type",            # 0  e.g. "disk", "volume"
+    "",                # 1  (empty in test archive)
+    "",                # 2
+    "disk_guid",       # 3  source disk UUID
+    "hostname",        # 4
+    "agent_build",     # 5  product name + version
+    "",                # 6
+    "",                # 7
+    "",                # 8
+    "",                # 9
+    "install_guid",    # 10 Acronis install UUID
+    "",                # 11
+    "",                # 12
+    "",                # 13
+    "",                # 14
+    "",                # 15
+    "",                # 16
+    "",                # 17
+    "",                # 18
+    "",                # 19
+)
+
+
+def parse_meta_keys(blob: bytes) -> List[str]:
+    """Parse a TLV[9] ``meta_keys`` payload into its per-slot strings.
+
+    Each slot is one NUL-terminated UTF-8 string, and the slots are
+    *positional* — empty slots (back-to-back NUL bytes) represent
+    meta-keys whose value is not stored for this archive. The loader
+    consumes at most :data:`META_KEYS_MAX` slots.
+
+    Parameters
+    ----------
+    blob : bytes
+        The raw TLV[9] payload (the bytes between the TLV length field
+        and the next TLV slot's length field).
+
+    Returns
+    -------
+    list[str]
+        A list of decoded UTF-8 strings, one per consumed slot. Empty
+        slots are returned as the empty string. The list length is
+        bounded by :data:`META_KEYS_MAX`.
+    """
+    out: List[str] = []
+    pos = 0
+    while pos < len(blob) and len(out) < META_KEYS_MAX:
+        end = blob.find(b"\x00", pos)
+        if end == -1:
+            # Trailing run with no NUL — treat as a final entry.
+            out.append(blob[pos:].decode("utf-8", errors="replace"))
+            break
+        out.append(blob[pos:end].decode("utf-8", errors="replace"))
+        pos = end + 1
+    return out
+
+
+def parse_meta_keys_dict(blob: bytes) -> dict[str, str]:
+    """Like :func:`parse_meta_keys`, but tagged with the key names.
+
+    Uses :data:`META_KEY_NAMES` to label each non-empty slot. Slots
+    whose key name is unknown (still blank in :data:`META_KEY_NAMES`)
+    are tagged ``"slot_<i>"`` so callers don't lose them.
+    """
+    values = parse_meta_keys(blob)
+    out: dict[str, str] = {}
+    for i, val in enumerate(values):
+        if not val:
+            continue
+        name = META_KEY_NAMES[i] if i < len(META_KEY_NAMES) and META_KEY_NAMES[i] else f"slot_{i}"
+        out[name] = val
+    return out
+
+
+@dataclass(frozen=True)
+class VolumeTableEntry:
+    """One TLV[18] ``volume_table`` record.
+
+    On-disk layout is 12 bytes: ``{BE u32 idx, BE u64 byte_offset}``.
+    ``idx`` is a per-archive volume index (0-based); ``byte_offset`` is
+    the source-disk byte offset where the volume's first sector lives.
+
+    Empirically (e.g. ``example.tibx``) a whole-disk image archive
+    carries a single ``(idx=0, byte_offset=0)`` record — i.e. one
+    "volume" covering the entire disk. Per-partition archives are
+    expected to carry one record per partition with the byte offsets
+    matching the MBR partition table, but no such sample has been
+    confirmed yet.
+    """
+
+    idx: int
+    byte_offset: int
+
+
+def parse_volume_table(blob: bytes) -> List[VolumeTableEntry]:
+    """Parse a TLV[18] ``volume_table`` payload into 12-byte records.
+
+    Returns an empty list when the blob is empty or its length is not
+    a multiple of 12. Padding tail bytes (blob length not divisible by
+    12) are silently dropped — they are not expected on disk but the
+    parser is permissive to keep failure modes obvious upstream.
+    """
+    n = len(blob) // 12
+    out: List[VolumeTableEntry] = []
+    for i in range(n):
+        rec = blob[i * 12 : (i + 1) * 12]
+        idx, byte_offset = struct.unpack(">IQ", rec)
+        out.append(VolumeTableEntry(idx=idx, byte_offset=byte_offset))
+    return out
+
+
 __all__ = [
     "PAGE_SIZE",
     "ENVELOPE_SIZE",
@@ -228,4 +360,10 @@ __all__ = [
     "crc32c",
     "compute_page_crc32",
     "read_stored_page_crc32",
+    "META_KEYS_MAX",
+    "META_KEY_NAMES",
+    "parse_meta_keys",
+    "parse_meta_keys_dict",
+    "VolumeTableEntry",
+    "parse_volume_table",
 ]
