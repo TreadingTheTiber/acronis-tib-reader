@@ -4,9 +4,12 @@ A practical guide for reading data out of an Acronis True Image `.tibx`
 backup with `tibread`. If you've just `pip install`-ed `tibread` and have
 a `.tibx` file in front of you, start here.
 
-> Status: the `.tibx` reader is **experimental**. Inspection commands
-> (`tibx-info`/`stat`/`verify`/`volumes`/`chain`) are solid; full file
-> extraction via `tibx-mount` is partial — see below.
+> Status: the `.tibx` reader supports **read-only FUSE mount**.
+> `tib mount backup.tibx /mnt/x --partition N` walks the
+> `data_map` + `segment_map` LSM trees to satisfy any read on a
+> selected MBR partition.  Inspection commands
+> (`tibx-info`/`stat`/`verify`/`volumes`/`chain`) remain available
+> for structural analysis.
 
 ---
 
@@ -30,15 +33,31 @@ Despite earlier folklore, it is **not** a SQLite database.
 | Validate page integrity (CRC-32C) | `tib tibx-verify FILE` |
 | List the volumes/partitions inside | `tib tibx-volumes FILE` |
 | List backup-chain slices (full / inc / diff) | `tib tibx-chain FILE` |
-| Mount and read individual files (**partial**) | `tib tibx-mount FILE MOUNT` |
+| **Mount and read individual files via FUSE** | `tib mount FILE MOUNT --partition N` |
+| Diagnostic NtfsVolume bootstrap probe | `tib tibx-mount FILE` |
 | Decompress arbitrary segments | Programmatic API |
 
-### `tibx-mount` caveats
+### Mounting a `.tibx`
 
-`tibx-mount` bootstraps an `NtfsVolume` and walks `segment_map` to
-satisfy reads. It works **for small partitions where the NTFS BPB lives
-in the bootstrap region** (first ~256 KiB). Larger volumes need the
-in-flight `disk_adapter` integration before mount is end-to-end reliable.
+```bash
+tib mount backup.tibx /mnt/tibx --partition 0   # System Reserved (typical 0)
+tib mount backup.tibx /mnt/tibx --partition 1   # main C: drive (default)
+ls /mnt/tibx
+file /mnt/tibx/Windows/System32/notepad.exe
+fusermount -u /mnt/tibx
+```
+
+The first read against a multi-GiB archive blocks ~30 s while the
+adapter builds the `data_map` extent index in memory; subsequent
+reads on the same mount are served from the cached index.  Routing
+between `.tib` and `.tibx` is by file extension *or* by the `QARCH`
+magic at the head of page 0, so a `.tibx` archive renamed to
+something else still mounts correctly.
+
+The legacy diagnostic `tib tibx-mount` command remains for
+RE / debugging — it bootstraps an `NtfsVolume` against the bootstrap
+region and reports BPB / MFT-record results without ever calling
+FUSE.  Use `tib mount` for actual file access.
 
 ---
 

@@ -5,7 +5,8 @@ Subcommands:
   tib info <tib>                       Show .tib structure (header, streams, MFT).
   tib index <tib> [--out IDX]          Build (or rebuild with --force) the partition-direct index.
   tib verify <tib>                     Validate volume header Adler32 + structural checks.
-  tib mount <tib> <mountpoint> [opts]  Mount the .tib's NTFS volume read-only via FUSE (Linux).
+  tib mount <file> <mountpoint> [opts] Mount a .tib or .tibx NTFS volume read-only via FUSE (Linux).
+                                       For .tibx use --partition N to pick the MBR partition.
   tib extract <tib> <path-in-vol> [-o] Extract a single file by NTFS path.
   tib ls <tib> [<path>]                List files in the .tib's filesystem.
   tib tibx-info <tibx>                 Show .tibx structure (experimental; archive3 page-store).
@@ -729,7 +730,12 @@ def cmd_mount(args):
         print(f"FUSE mount unavailable: {e}", file=sys.stderr)
         print("Install with: pip install fusepy", file=sys.stderr)
         return 1
-    return fuse_mount(args.tib, args.mountpoint, foreground=args.foreground)
+    return fuse_mount(
+        args.tib,
+        args.mountpoint,
+        foreground=args.foreground,
+        partition=args.partition,
+    )
 
 
 def main(argv=None):
@@ -837,11 +843,24 @@ def main(argv=None):
     ap.add_argument("tibx")
     ap.set_defaults(func=cmd_tibx_chain)
 
-    ap = sub.add_parser("mount", help="Mount the .tib's NTFS volume read-only.")
-    ap.add_argument("tib")
+    ap = sub.add_parser(
+        "mount",
+        help="Mount the backup's NTFS volume read-only "
+             "(.tib or .tibx).",
+    )
+    ap.add_argument("tib", help="Path to a .tib or .tibx file.")
     ap.add_argument("mountpoint")
     ap.add_argument("-f", "--foreground", action="store_true",
                     help="Don't daemonize (default: daemonize).")
+    ap.add_argument(
+        "--partition",
+        type=int,
+        default=1,
+        help="MBR partition index to mount (0-based). Only used for "
+             ".tibx; ignored for sector-mode .tib (single partition). "
+             "Default: 1 (typically the main system partition; "
+             "partition 0 is usually 'System Reserved').",
+    )
     ap.set_defaults(func=cmd_mount)
 
     args = p.parse_args(argv)

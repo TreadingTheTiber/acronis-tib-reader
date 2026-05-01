@@ -71,13 +71,20 @@ System packages required for the FUSE mount on Linux:
 
 ## Quickstart
 
-### Mount a `.tib` and browse files
+### Mount a `.tib` or `.tibx` and browse files
 
 ```bash
+# Sector-mode .tib (TI 2018-19): single partition, no flag needed
 tib mount backup_full_b1_s1_v1.tib /mnt/tib
 ls /mnt/tib
 file "/mnt/tib/Users/alice/Documents/x.docx"
 fusermount -u /mnt/tib   # unmount
+
+# .tibx (TI 2020+): MBR multi-partition, pick one with --partition
+tib mount backup.tibx /mnt/tibx --partition 0   # System Reserved
+tib mount backup.tibx /mnt/tibx --partition 1   # main C: drive (default)
+ls /mnt/tibx
+fusermount -u /mnt/tibx
 ```
 
 ### Extract a single file
@@ -108,22 +115,24 @@ robocopy "\\?\X:\path\to\mount" "\\?\D:\restored" /E /R:0 /W:0 /XJ /MT:8 /COPY:D
 
 (`/XJ` skips reparse points like `TheVolumeSettingsFolder`. Use `\\?\` for paths >260 chars.)
 
-### Inspect a `.tibx` archive (TI 2020+, experimental)
+### Inspect a `.tibx` archive (TI 2020+)
 
-The `.tibx` reader is read-only and currently exposes six inspection
-commands. Full mount lands once the in-flight `disk_adapter` integration
-is merged; today `tibx-mount` exercises the bootstrap path only.
+The `.tibx` reader is read-only and exposes both inspection commands
+and a full FUSE mount.  The `disk_adapter` integration is wired
+end-to-end: `tib mount backup.tibx /mnt/x --partition N` walks the
+`data_map` + `segment_map` LSM trees to satisfy any read.
 
 For an end-to-end walkthrough (with verified command output and the
 programmatic API), see [`docs/TIBX_USER_GUIDE.md`](docs/TIBX_USER_GUIDE.md).
 
 ```bash
+tib mount        backup.tibx /mnt/tibx --partition 0   # FUSE mount (read-only)
 tib tibx-info    backup.tibx              # ARCH header (hostname, GUID, agent build) + segment scan
 tib tibx-stat    backup.tibx              # LSM-tree superblocks + ctree summary
 tib tibx-verify  backup.tibx --sample 100 # Sample N pages and validate CRC-32C
 tib tibx-volumes backup.tibx              # TLV[18] volume_table cross-referenced against the MBR
 tib tibx-chain   backup.tibx              # Enumerate slices (full / inc / diff) from TLV[5]
-tib tibx-mount   backup.tibx              # Bootstrap NtfsVolume (currently MBR + first 256 KiB only)
+tib tibx-mount   backup.tibx              # Diagnostic-only: NtfsVolume bootstrap probe
 ```
 
 Encrypted (`key != 0`, AES-wrapped) archives are decoded in spec only —
@@ -152,7 +161,7 @@ data = vol.read_file("Users/alice/Documents/x.docx")
 | Sector-mode `.tib`, modern (TI 2018+, 16-byte preamble + 128-cluster blocks) | ✅ Supported | The common full-disk backup format from Acronis True Image 2018-2019. See `docs/FORMAT.md`. |
 | Sector-mode `.tib`, legacy (TI 2014/2015/2016, 8-byte preamble + 64-cluster blocks) | ✅ Supported | Recognised by absence of TLV tag `0x9b` in the metadata blob; chunk map is split across inline `SequentialChunkMap` records interleaved with the block stream. **First open is slow** (sequential scan to find the inline chunk maps — ~4 minutes for 8 GB; subsequent opens are instant via the cached `.idx` sidecar). See `docs/FORMAT_LEGACY.md`. |
 | Sector-mode `.tib`, very-legacy (TI 2010-2013, `version=1` + `sector_size=0x1000`) | ❌ Rejected with a clean error | Acronis True Image 2018+ reads these only by destructively migrating them in-place to the modern format. To read with `tibread`: open once in TI 2018+ to migrate, then re-run. See `docs/FORMAT_VERY_LEGACY.md`. |
-| `.tibx` (TIB eXtended, "QARCH" archive3 page-store) | ⚠️ Experimental — `info` / `stat` / `verify` / `volumes` / `chain` work; `mount` reaches the bootstrap region only (full mount lands with disk_adapter integration) | Acronis True Image 2020+ uses a 4 KiB-page LSM-tree store with Zstd-compressed segments (not SQLite, despite earlier folklore). `tibread.TibxReader` decodes: page header + CRC-32C + single-bit FEC; the 19-entry ARCH-header TLV directory (canonical mapping in `docs/legacy/ARCHIVE3_TLV_DIRECTORY.md`); all 9 LSM superblocks; ctree walks across LDIR / LEAF pages with the cell decoder; segment decompression (Zstd `key=0`); all six page types named (incl. `0x05` Golomb-Rice dedup filter); slice / backup-chain enumeration via `tibread.tibx.chains`. The encryption format (`key!=0` AES-wrapped segments) is spec'd as a skeleton in `tibread/tibx/encryption.py`. Working CLI commands: `tib tibx-info`, `tib tibx-stat`, `tib tibx-verify`, `tib tibx-volumes`, `tib tibx-chain`, `tib tibx-mount` (bootstrap-only). FUSE mount via the disk-adapter shim is in active integration. Tested on one specific file. See `tibread/tibx/` and `docs/FORMAT_TIBX.md`. |
+| `.tibx` (TIB eXtended, "QARCH" archive3 page-store) | ✅ Mount supported (`tib mount backup.tibx /mnt/x --partition N`) | Acronis True Image 2020+ uses a 4 KiB-page LSM-tree store with Zstd-compressed segments (not SQLite, despite earlier folklore). `tibread.TibxReader` decodes: page header + CRC-32C + single-bit FEC; the 19-entry ARCH-header TLV directory (canonical mapping in `docs/legacy/ARCHIVE3_TLV_DIRECTORY.md`); all 9 LSM superblocks; ctree walks across LDIR / LEAF pages with the cell decoder; segment decompression (Zstd `key=0`); all six page types named (incl. `0x05` Golomb-Rice dedup filter); slice / backup-chain enumeration via `tibread.tibx.chains`. The disk-adapter shim (`tibread.tibx.TibxDiskAdapter`) walks `data_map` (TLV[1]) and `segment_map` (TLV[2]) so `NtfsVolume` can satisfy any read; FUSE mount is wired into `tib mount` and routes by file extension or `QARCH` magic. The encryption format (`key!=0` AES-wrapped segments) is spec'd as a skeleton in `tibread/tibx/encryption.py`. Working CLI commands: `tib mount`, `tib tibx-info`, `tib tibx-stat`, `tib tibx-verify`, `tib tibx-volumes`, `tib tibx-chain`, `tib tibx-mount` (diagnostic). Tested on one specific file. See `tibread/tibx/` and `docs/FORMAT_TIBX.md`. |
 | Filesystem-mode v1 `.tib` (magic `0x8F5C36C6`) | ⚠️ Format spec'd, not yet implemented | See `docs/FORMAT.md` |
 | Filesystem-mode v2 `.tib` (magic `0x44686EB4`) | ⚠️ Format spec'd, not yet implemented | See `docs/FORMAT.md` |
 | Tape archive `.tib` (footer magic `0x179631B4`) | ❌ Out of scope | Rare in 2026 |
