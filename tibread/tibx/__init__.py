@@ -82,6 +82,14 @@ from .data_map import (
     load_extents,
     lookup_le,
 )
+from .segment_map import (
+    SegLocator,
+    build_seg_index_from_lsm,
+    decode_segment_map_value,
+    load_seg_index,
+    load_seg_index_cache,
+    save_seg_index,
+)
 
 __all__ = [
     "TibxReader",
@@ -147,4 +155,11 @@ __all__ = [
     "decode_value",
     "load_extents",
     "lookup_le",
+    # segment_map (TLV[2]) seg_id index (segment_map.py)
+    "SegLocator",
+    "build_seg_index_from_lsm",
+    "decode_segment_map_value",
+    "load_seg_index",
+    "load_seg_index_cache",
+    "save_seg_index",
 ]

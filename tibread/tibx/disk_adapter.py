@@ -1,56 +1,87 @@
 """
-tibread.tibx.disk_adapter — bridge :class:`TibxReader` to :class:`NtfsVolume`.
+tibread.tibx.disk_adapter - bridge :class:`TibxReader` to :class:`NtfsVolume`.
 
 The existing NTFS parser (:class:`tibread.ntfs.NtfsVolume`) expects a
 "disk reader" object that exposes:
 
-* ``read(offset, length) -> bytes`` — return ``length`` bytes starting at
+* ``read(offset, length) -> bytes`` - return ``length`` bytes starting at
   byte offset ``offset`` on the source disk;
-* ``partition_size`` (int, bytes) — total source-disk byte length;
-* ``block_count`` (int) — number of 4 KiB blocks (used by some scan
+* ``partition_size`` (int, bytes) - total source-disk byte length;
+* ``block_count`` (int) - number of 4 KiB blocks (used by some scan
   fast-paths).
 
 :class:`TibxDiskAdapter` provides exactly that surface on top of a
 :class:`TibxReader`, so a ``.tibx`` archive can be fed to ``NtfsVolume``
 as if it were a flat partition image.
 
-Status
-------
+How a read is satisfied
+-----------------------
 
-Until the ``segment_map`` LSM walker lands (see
-:mod:`tibread.tibx.lsm_cells`), only the **bootstrap** region of the
-source disk (the first ``BOOTSTRAP_LEN`` = 256 KiB) is readable. Reads
-beyond that range raise a clearer wrapping of
-:class:`ChunkMapNotImplemented` so callers can detect the
-"LSM-walker-not-yet-here" failure mode unambiguously and fall back if
-appropriate.
+There are three regions an offset can fall in:
 
-In practice this is enough for ``NtfsVolume`` to:
+1. **The whole-disk MBR / bootstrap region** ``[0, BOOTSTRAP_LEN)``.  The
+   first SG segment in the archive (seg_id 4 in v8 archives) carries the
+   uncompressed first 256 KiB of source-disk content; reads in this
+   range are served directly from that segment.  Whole-disk views
+   (``partition_offset == 0``) start here.
 
-* parse the boot sector (BPB) — succeeds, BPB lives at LBA 0;
-* discover ``$MFT``'s LCN — succeeds (BPB byte at +0x30);
+2. **Partition content**, when ``partition_offset > 0``.  The partition
+   that starts at ``partition_offset`` corresponds to one of the
+   ``data_map`` streams (``volume_id``), and reads are translated to the
+   covering extent via :func:`tibread.tibx.data_map.lookup_le`.  The
+   extent points at a segment id; that id is resolved through
+   :mod:`tibread.tibx.segment_map` to a file byte offset, the segment
+   is decompressed, and the requested slice is returned.  Decompressed
+   segments are cached (LRU) so consecutive reads inside the same
+   segment don't re-decompress.
 
-But the very next step (read MFT record 0 at LCN ~786432, byte offset
-~3.2 GiB) will hit the not-yet-implemented path and raise.
+3. **Sparse holes** between data_map extents are returned as zeros,
+   matching the source-disk semantics for unallocated NTFS clusters.
+
+Volume discovery
+----------------
+
+The ``data_map`` keys identify their stream by an opaque ``volume_id``
+field (in :file:`Jmicron 0102.tibx` the small metadata streams are 2..9,
+the system-reserved partition is 6, and the main partition is 10).  We
+discover which volume_id corresponds to a given ``partition_offset`` by:
+
+1. Listing every ``volume_id`` that has at least one extent at source
+   offset 0 (i.e. starts the partition);
+2. Reading that extent's segment, peeking at the BPB ``total_sectors``;
+3. Matching it to the MBR partition entry whose ``lba_count`` equals
+   that ``total_sectors``.
+
+This works for NTFS / exFAT / FAT32 partitions whose BPB carries a
+sector count.  For partition layouts we can't auto-discover, the caller
+can pass ``volume_id`` explicitly to the constructor.
 
 Example
 -------
 
->>> from tibread.tibx.disk_adapter import TibxDiskAdapter
+>>> from tibread.tibx import TibxDiskAdapter
 >>> from tibread.ntfs import NtfsVolume
->>> adapter = TibxDiskAdapter("/mnt/e/Jmicron 0102.tibx")
->>> # Boot-sector parse works:
->>> mbr = adapter.read(0, 512)
->>> assert mbr[510:512] == b"\\x55\\xaa"
->>> # NtfsVolume bootstrap will get past the BPB but fail on MFT read.
+>>> with TibxDiskAdapter("/mnt/e/Jmicron 0102.tibx") as a:
+...     parts = a.list_mbr_partitions()
+>>> # Partition 0 = System Reserved, starts 1 MiB into the disk:
+>>> with TibxDiskAdapter("/mnt/e/Jmicron 0102.tibx",
+...                      partition_offset=parts[0]["byte_offset"]) as pa:
+...     bpb = pa.read(0, 512)
+...     vol = NtfsVolume(pa, build_index=False)
+...     mft0 = vol.read_mft_record(0)
 """
 from __future__ import annotations
 
+import bisect
 import struct
-from typing import Optional
+from collections import OrderedDict
+from typing import Dict, List, Optional, Tuple
 
+from .data_map import DataMapEntry, load_extents
 from .disk_image import BOOTSTRAP_LEN, ChunkMapNotImplemented
 from .reader import TibxReader
+from .segment import parse_sg_header
+from .segment_map import SegLocator, load_seg_index
 
 
 __all__ = ["TibxDiskAdapter", "TibxAdapterError"]
@@ -66,13 +97,16 @@ DEFAULT_CLUSTER_SIZE = 4096
 # detect it from the BPB and rewire this.
 SECTOR_SIZE = 512
 
+# Maximum number of decompressed segments to keep in the per-adapter
+# LRU cache.  ~32 segments at a typical 200 KiB plaintext is ~6 MiB.
+DEFAULT_SEGMENT_CACHE_SIZE = 32
+
 
 class TibxAdapterError(IOError):
     """Raised when the adapter can't satisfy a request for non-LSM reasons.
 
-    Distinct from :class:`ChunkMapNotImplemented` (which signals the
-    in-flight LSM walker) so callers can tell apart "would work after
-    the LSM cell decoder lands" from "this archive is malformed".
+    Distinct from :class:`ChunkMapNotImplemented` (which signals an
+    unsupported region) so callers can tell the two apart.
     """
 
 
@@ -83,21 +117,22 @@ class TibxDiskAdapter:
     ----------
     tibx_path : str
         Path to the ``.tibx`` file.
+    partition_offset : int, optional
+        Byte offset on the source disk where the partition of interest
+        starts.  All :meth:`read` calls add this to the requested offset,
+        presenting a partition-relative view to ``NtfsVolume`` (which
+        expects ``read(0, 512)`` to return the NTFS BPB, not the MBR).
+        Defaults to ``0`` (whole-disk view).
+    volume_id : int, optional
+        The data_map stream id for this partition's content.  When
+        omitted (default), discovered automatically from the BPB
+        ``total_sectors`` field on first non-bootstrap read.
 
     Notes
     -----
     The adapter takes ownership of the underlying :class:`TibxReader`
     file handle.  Use it as a context manager (or call :meth:`close`)
     to release the handle.
-
-    The :attr:`partition_size` calculation is best-effort: the
-    authoritative source is the ARCH header's TLV[18] ``volume_table``,
-    but parsing that requires walking a TLV directory we haven't fully
-    decoded.  As a fallback we read the source-disk MBR (which lives in
-    the bootstrap region and is therefore always readable) and use the
-    end of the largest primary partition.  If both paths fail we expose
-    ``partition_size = BOOTSTRAP_LEN`` so callers at least see a
-    consistent (if conservative) bound.
     """
 
     cluster_size: int = DEFAULT_CLUSTER_SIZE
@@ -106,21 +141,10 @@ class TibxDiskAdapter:
         self,
         tibx_path: str,
         partition_offset: int = 0,
+        *,
+        volume_id: Optional[int] = None,
+        segment_cache_size: int = DEFAULT_SEGMENT_CACHE_SIZE,
     ) -> None:
-        """Open ``tibx_path`` as a flat-disk view.
-
-        Parameters
-        ----------
-        tibx_path : str
-            Path to the ``.tibx`` archive.
-        partition_offset : int, optional
-            Byte offset on the source disk where the partition of
-            interest starts.  All :meth:`read` calls add this to the
-            requested offset, presenting a partition-relative view to
-            ``NtfsVolume`` (which expects ``read(0, 512)`` to return the
-            NTFS BPB, not the MBR).  Defaults to ``0`` (whole-disk
-            view).
-        """
         if partition_offset < 0:
             raise ValueError(
                 f"partition_offset must be non-negative, got {partition_offset}"
@@ -129,6 +153,20 @@ class TibxDiskAdapter:
         self.partition_offset = partition_offset
         self._reader = TibxReader(tibx_path)
         self._partition_size: Optional[int] = None
+
+        # Lazy-built indexes.
+        self._seg_index: Optional[Dict[int, SegLocator]] = None
+        self._extents: Optional[List[DataMapEntry]] = None
+        # Per-volume sorted source_offset arrays for binary search.
+        self._extents_by_volume: Optional[
+            Dict[int, Tuple[List[int], List[DataMapEntry]]]
+        ] = None
+        self._volume_id: Optional[int] = volume_id
+
+        # LRU cache of decompressed segment plaintexts:
+        # OrderedDict[seg_id -> bytes].  Most-recently-used at the end.
+        self._segment_cache: "OrderedDict[int, bytes]" = OrderedDict()
+        self._segment_cache_size = segment_cache_size
 
     # -------- resource management -------------------------------------- #
 
@@ -152,50 +190,238 @@ class TibxDiskAdapter:
     # -------- core read API expected by NtfsVolume --------------------- #
 
     def read(self, offset: int, length: int) -> bytes:
-        """Return ``length`` bytes starting at byte ``offset`` on the source disk.
+        """Return ``length`` bytes starting at byte ``offset``.
 
-        Routes the request through :meth:`TibxReader.read_lba_range`,
-        which currently only services reads inside the bootstrap region
-        ``[0, BOOTSTRAP_LEN)``. Reads beyond that re-raise as a clearer
-        :class:`ChunkMapNotImplemented` instance so callers can detect
-        the "LSM walker not yet implemented" failure cleanly.
-
-        Byte-aligned reads (offset / length not multiples of 512) are
-        supported by reading a sector-aligned superset and slicing.
+        ``offset`` is interpreted relative to :attr:`partition_offset`
+        (so for a partition-view adapter, ``offset=0`` is the start of
+        the partition).
         """
         if length <= 0:
             raise ValueError(f"length must be positive, got {length}")
         if offset < 0:
             raise ValueError(f"offset must be non-negative, got {offset}")
 
-        # Translate from partition-relative to source-disk-absolute.
-        abs_offset = offset + self.partition_offset
+        # Partition-view: serve via data_map extents on the matching
+        # volume_id.  Falls back to ChunkMapNotImplemented if the
+        # discovery + lookup pipeline can't satisfy the read (rare).
+        if self.partition_offset > 0:
+            return self._read_partition(offset, length)
 
-        # Sector-align the underlying read.
+        # Whole-disk view: bootstrap-only path (the MBR and the first
+        # 256 KiB of source content live in segment 4).  Anything past
+        # that requires the per-volume data_map - which we don't have
+        # for a whole-disk view because the disk's MBR isn't a member
+        # of any data_map stream.
+        abs_offset = offset
+        end = abs_offset + length
+        if end > BOOTSTRAP_LEN:
+            raise ChunkMapNotImplemented(
+                f"TibxDiskAdapter.read({offset}, {length}): whole-disk "
+                f"reads past {BOOTSTRAP_LEN} (256 KiB) require a "
+                f"partition-view adapter (pass partition_offset=...)."
+            )
+        return self._read_bootstrap(abs_offset, length)
+
+    # -------- bootstrap (whole-disk) path ------------------------------ #
+
+    def _read_bootstrap(self, abs_offset: int, length: int) -> bytes:
+        """Serve a read from the first SG segment (whole-disk MBR + 256 KiB)."""
         sec_start = abs_offset // SECTOR_SIZE
         sec_byte_start = sec_start * SECTOR_SIZE
         slice_lo = abs_offset - sec_byte_start
-        # Round the end up to the next sector boundary.
         end = abs_offset + length
         sec_byte_end = ((end + SECTOR_SIZE - 1) // SECTOR_SIZE) * SECTOR_SIZE
         aligned_len = sec_byte_end - sec_byte_start
 
-        try:
-            raw = self._reader.read_lba_range(
-                sec_start, aligned_len, sector_size=SECTOR_SIZE
-            )
-        except ChunkMapNotImplemented as exc:
-            # Re-raise with a clearer message that names the in-flight
-            # decoder.  Preserve the chain so callers can see the
-            # underlying disk_image-layer message if they care.
-            raise ChunkMapNotImplemented(
-                f"TibxDiskAdapter.read({offset}, {length}): "
-                f"reading source bytes >= 256 KB requires the segment_map "
-                f"LSM walker, which is not yet implemented. "
-                f"See tibread/tibx/lsm_cells.py status."
-            ) from exc
-
+        raw = self._reader.read_lba_range(
+            sec_start, aligned_len, sector_size=SECTOR_SIZE
+        )
         return raw[slice_lo : slice_lo + length]
+
+    # -------- partition-view path -------------------------------------- #
+
+    def _ensure_indexes(self) -> None:
+        """Build segment_map and data_map indexes lazily on first use."""
+        if self._seg_index is None:
+            self._seg_index = load_seg_index(self._reader)
+        if self._extents is None:
+            self._extents = load_extents(self._reader)
+            # Group by volume_id and build a parallel sorted list of
+            # source_offsets for bisect-based lookup.
+            by_vol: Dict[int, List[DataMapEntry]] = {}
+            for e in self._extents:
+                by_vol.setdefault(e.key.volume_id, []).append(e)
+            self._extents_by_volume = {
+                vid: (
+                    [e.key.source_offset for e in entries],
+                    entries,
+                )
+                for vid, entries in by_vol.items()
+            }
+
+    def _discover_volume_id(self) -> int:
+        """Pick the data_map ``volume_id`` matching :attr:`partition_offset`.
+
+        Strategy: every candidate volume's first extent (at source
+        offset 0) is its boot record.  We decompress the segment, peek
+        at the BPB ``total_sectors`` field, and pick the volume whose
+        sector count matches the MBR partition entry at our offset.
+
+        Falls back to ``TibxAdapterError`` if no match is found - the
+        caller can override by passing ``volume_id`` to the constructor.
+        """
+        self._ensure_indexes()
+        assert self._extents_by_volume is not None
+
+        # Find the MBR entry that matches our partition_offset.
+        mbr_partitions = self.list_mbr_partitions()
+        match = next(
+            (
+                p
+                for p in mbr_partitions
+                if p["byte_offset"] == self.partition_offset
+            ),
+            None,
+        )
+        expected_total_sectors = match["lba_count"] if match else None
+
+        # For every volume whose lowest source_offset is 0, peek at the
+        # boot sector of its first extent's segment.
+        candidates: List[Tuple[int, int, int]] = []
+        for vid, (offsets, entries) in self._extents_by_volume.items():
+            if not offsets or offsets[0] != 0:
+                continue
+            entry = entries[0]
+            seg_id = entry.value.segment_id
+            try:
+                segment = self._read_segment_plaintext(seg_id)
+            except Exception:
+                continue
+            if len(segment) < 512 or segment[510:512] != b"\x55\xaa":
+                continue
+            # NTFS / exFAT / FAT BPBs all carry a 16-bit total_sectors
+            # at +0x13 with 0 indicating "use the 32-bit field at +0x20"
+            # for >= 64 KiB volumes.  We use the same fallback chain.
+            small = struct.unpack("<H", segment[0x13:0x15])[0]
+            big32 = struct.unpack("<I", segment[0x20:0x24])[0]
+            if small != 0:
+                total = small
+            else:
+                total = big32
+            # NTFS specifically stores total_sectors at +0x28 as a u64.
+            ntfs_total = struct.unpack("<Q", segment[0x28:0x30])[0]
+            candidates.append((vid, total, ntfs_total))
+
+        if not candidates:
+            raise TibxAdapterError(
+                "no data_map volume has an extent at source offset 0; "
+                "cannot auto-discover volume_id - pass volume_id=... "
+                "explicitly"
+            )
+
+        if expected_total_sectors is not None:
+            # Try matching against the NTFS u64 first (most precise),
+            # then the BPB u16/u32 (size + 1 because NTFS stores
+            # last-sector index).
+            for vid, total, ntfs_total in candidates:
+                if (
+                    ntfs_total + 1 == expected_total_sectors
+                    or ntfs_total == expected_total_sectors
+                    or total == expected_total_sectors
+                ):
+                    return vid
+
+        # Fallback: if there's only one candidate, use it.
+        if len(candidates) == 1:
+            return candidates[0][0]
+
+        candidates_repr = ", ".join(
+            f"vol={vid}(bpb_total={t},ntfs_total={nt})"
+            for vid, t, nt in candidates
+        )
+        raise TibxAdapterError(
+            f"could not match partition_offset={self.partition_offset} "
+            f"(expected_total_sectors={expected_total_sectors}) to any "
+            f"data_map volume; candidates: {candidates_repr}"
+        )
+
+    def _ensure_volume_id(self) -> int:
+        if self._volume_id is None:
+            self._volume_id = self._discover_volume_id()
+        return self._volume_id
+
+    def _read_partition(self, offset: int, length: int) -> bytes:
+        """Serve a partition-view read by walking data_map + segment_map."""
+        self._ensure_indexes()
+        vid = self._ensure_volume_id()
+        assert self._extents_by_volume is not None
+
+        out = bytearray()
+        cursor = offset
+        end = offset + length
+        offsets, entries = self._extents_by_volume.get(vid, ([], []))
+        while cursor < end:
+            # Find the extent <= cursor.  bisect_right - 1.
+            idx = bisect.bisect_right(offsets, cursor) - 1
+            extent: Optional[DataMapEntry] = entries[idx] if idx >= 0 else None
+            ext_end = extent.end_offset if extent else 0
+            if extent is None or cursor >= ext_end:
+                # In a sparse hole.  Zero-fill until the next extent
+                # (or the requested end, whichever is sooner).
+                if extent is None or idx + 1 >= len(entries):
+                    next_off = end
+                else:
+                    next_off = min(end, entries[idx + 1].key.source_offset)
+                fill = next_off - cursor
+                out.extend(b"\x00" * fill)
+                cursor = next_off
+                continue
+
+            # Take whatever this extent contributes up to ``end``.
+            take_end = min(end, ext_end)
+            seg_id = extent.value.segment_id
+            seg_plain = self._read_segment_plaintext(seg_id)
+            # extent_index 0xFFFF means "extent fills the whole
+            # segment"; for now we always slice from offset zero in the
+            # segment plaintext.  Multi-extent segments would need the
+            # extent_index to translate to a within-segment offset; no
+            # such case has been observed in the reference archive.
+            seg_off = cursor - extent.key.source_offset
+            chunk = seg_plain[seg_off : seg_off + (take_end - cursor)]
+            if len(chunk) < (take_end - cursor):
+                # Defensive: pad with zeros if the segment plaintext is
+                # shorter than the extent claims.  Should not happen on
+                # a well-formed archive.
+                chunk = chunk + b"\x00" * ((take_end - cursor) - len(chunk))
+            out.extend(chunk)
+            cursor = take_end
+        return bytes(out)
+
+    def _read_segment_plaintext(self, seg_id: int) -> bytes:
+        """Return the (cached) decompressed plaintext of segment ``seg_id``."""
+        cached = self._segment_cache.get(seg_id)
+        if cached is not None:
+            self._segment_cache.move_to_end(seg_id)
+            return cached
+        assert self._seg_index is not None
+        loc = self._seg_index.get(seg_id)
+        if loc is None:
+            raise TibxAdapterError(f"segment_id {seg_id} not in segment_map")
+        # Re-parse the SG header at the recorded page so we can call
+        # decompress_segment without re-scanning the file.
+        page = self._reader._raw_read_page(loc.page_offset)  # type: ignore[attr-defined]
+        seg = parse_sg_header(page, loc.page_offset)
+        if seg is None:
+            raise TibxAdapterError(
+                f"segment_id {seg_id} at page {loc.page_offset} is not "
+                f"an SG header (segment_map cache stale?)"
+            )
+        plain = self._reader.decompress_segment(seg)
+        self._segment_cache[seg_id] = plain
+        if len(self._segment_cache) > self._segment_cache_size:
+            # Pop the least-recently-used entry.
+            self._segment_cache.popitem(last=False)
+        return plain
 
     # -------- properties expected by NtfsVolume ------------------------ #
 
@@ -214,21 +440,7 @@ class TibxDiskAdapter:
     # -------- size discovery ------------------------------------------- #
 
     def _discover_partition_size(self) -> int:
-        """Best-effort recovery of disk-or-partition byte length.
-
-        When :attr:`partition_offset` is non-zero we are presenting a
-        partition view — find the matching MBR entry and report just
-        that partition's size.  Otherwise return the whole-disk size.
-
-        Tries, in order:
-
-        1. ARCH-header TLV[18] ``volume_table`` (authoritative when
-           parseable) — see ``ARCHIVE3_TLV_DIRECTORY.md``.
-        2. MBR partition table at sector 0 (always readable since LBA 0
-           is in the bootstrap region).
-        3. Fallback to ``BOOTSTRAP_LEN`` so callers see a consistent
-           non-zero value even when nothing else worked.
-        """
+        """Best-effort recovery of disk-or-partition byte length."""
         if self.partition_offset > 0:
             size = self._partition_size_from_mbr()
             if size is not None:
@@ -246,15 +458,7 @@ class TibxDiskAdapter:
         return BOOTSTRAP_LEN
 
     def _partition_size_from_mbr(self) -> Optional[int]:
-        """Return the byte-length of the partition starting at :attr:`partition_offset`.
-
-        Looks up the MBR partition entry whose ``first_lba * SECTOR_SIZE``
-        matches :attr:`partition_offset` and returns its ``lba_count``
-        translated to bytes.  Returns ``None`` if no entry matches (e.g.
-        the caller hand-rolled an offset into a GPT partition).
-        """
-        # Read MBR through the underlying reader (not self.read, which
-        # would shift by partition_offset).
+        """Return byte-length of the partition starting at :attr:`partition_offset`."""
         try:
             raw = self._reader.read_lba_range(0, 512, sector_size=SECTOR_SIZE)
         except Exception:
@@ -273,13 +477,7 @@ class TibxDiskAdapter:
         return None
 
     def list_mbr_partitions(self) -> "list[dict]":
-        """Return a list describing the four MBR partition entries.
-
-        Each entry is ``{'type': u8, 'first_lba': int, 'lba_count': int,
-        'byte_offset': int, 'byte_size': int}``.  Empty entries (type
-        0) are skipped.  Returns an empty list if the MBR signature is
-        missing.
-        """
+        """Return a list describing the four MBR partition entries."""
         try:
             raw = self._reader.read_lba_range(0, 512, sector_size=SECTOR_SIZE)
         except Exception:
@@ -306,21 +504,7 @@ class TibxDiskAdapter:
         return out
 
     def _volume_size_from_tlv18(self) -> Optional[int]:
-        """Return total disk size derived from ARCH TLV[18], or ``None``.
-
-        TLV[18] (``volume_table``) is documented as an array of 12-byte
-        records ``{u32 vol_index, u64 start_offset}`` (see
-        ``ARCHIVE3_TLV_DIRECTORY.md``). The records describe partition
-        *start* offsets only; per-partition lengths are not stored
-        here. We therefore use TLV[18] only as a lower bound on the
-        disk size (``max(start_offset)``) and rely on the MBR fallback
-        for the real total.  Returns ``None`` when the header can't be
-        parsed or the slot is empty.
-        """
-        # Defer the import — ``lsm.py`` imports ``segment`` etc. and we
-        # don't want to drag those into module-import time when only
-        # ``read()`` is needed (e.g. in the unit tests for the
-        # bootstrap region).
+        """Return total disk size derived from ARCH TLV[18], or ``None``."""
         try:
             from .lsm import read_archive_header
         except Exception:
@@ -349,18 +533,7 @@ class TibxDiskAdapter:
         return max_start
 
     def _volume_size_from_mbr(self) -> Optional[int]:
-        """Derive disk size from the MBR partition table at LBA 0.
-
-        The MBR layout (legacy DOS partition table):
-          * Bytes 0x1BE..0x1FD = four 16-byte partition-table entries.
-          * Each entry +0x08 = u32 first LBA (LE), +0x0C = u32 LBA count (LE).
-          * MBR signature 0x55AA at offset 0x1FE.
-
-        We pick the largest ``first_lba + lba_count`` across the four
-        entries and translate to bytes via ``SECTOR_SIZE``. Returns
-        ``None`` if the MBR signature is missing or no partition entry
-        is non-zero (e.g. GPT-only disk; we don't yet parse GPT).
-        """
+        """Derive disk size from the MBR partition table at LBA 0."""
         try:
             mbr = self.read(0, 512)
         except Exception:
