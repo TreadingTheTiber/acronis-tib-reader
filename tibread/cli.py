@@ -9,7 +9,9 @@ Subcommands:
   tib extract <tib> <path-in-vol> [-o] Extract a single file by NTFS path.
   tib ls <tib> [<path>]                List files in the .tib's filesystem.
   tib tibx-info <tibx>                 Show .tibx structure (experimental; archive3 page-store).
+  tib tibx-stat <tibx>                 Show detailed .tibx LSM-tree status (per-tree ctree summary).
   tib tibx-verify <tibx>               Validate every page's CRC-32C; report mismatches.
+  tib tibx-mount <tibx>                Probe NTFS via .tibx-backed disk adapter [experimental].
 
 Examples:
   tib info backup_full_b1_s1_v1.tib
@@ -195,6 +197,115 @@ def cmd_tibx_info(args):
     return 0
 
 
+def cmd_tibx_stat(args):
+    """Print the per-LSM-tree summary for a ``.tibx`` archive.
+
+    This is the tibx-shaped equivalent of ``tib info --ntfs`` for .tib:
+    archive UUID + source disk + hostname + agent build, then a
+    summary row per LSM tree (key/value sizes, ctree count, item
+    count, root page offsets), then a coarse file-map breakdown.
+    """
+    from .tibx import TibxReader, read_archive_header, walk_ctree
+    from .tibx.format import PAGE_TYPE_NAMES
+
+    with TibxReader(args.tibx) as r:
+        info = r.read_arch_header()
+        hdr = read_archive_header(r)
+
+        print(f"tibx file: {args.tibx}")
+        print(f"  size: {r.file_size:,} bytes  ({r.page_count:,} pages of 4 KiB)")
+        print()
+        print("ARCH header:")
+        for key in (
+            "header_magic",
+            "version",
+            "archive_uuid",
+            "created_unix_ms",
+            "modified_unix_ms",
+            "hostname",
+            "disk_guid",
+            "install_guid",
+            "agent_build",
+        ):
+            if key in info:
+                print(f"  {key:18s}: {info[key]}")
+        print(f"  arch_page         : {hdr.arch_page} (latest)")
+        print(f"  hdr_size          : 0x{hdr.hdr_size:x}  ({hdr.hdr_size} bytes)")
+        print(f"  hdr_version       : {hdr.hdr_version}")
+        print()
+
+        print(f"LSM index ({len(hdr.lsm_trees)} L-SB superblocks parsed):")
+        # Header row.
+        print(f"  {'TLV':>3}  {'name':12s}  {'k/v':7s}  "
+              f"{'seq':>5s}  {'ctrees':>6s}  {'items':>6s}  "
+              f"{'pages':>7s}  roots")
+        for sb in hdr.lsm_trees:
+            roots = []
+            total_items = 0
+            total_num_pages = 0
+            active_ctrees = 0
+            for ci, ct in enumerate(sb.ctrees):
+                if ct.offset is None:
+                    continue
+                active_ctrees += 1
+                total_items += ct.item_count
+                total_num_pages += ct.num_pages
+                roots.append(f"L{ci+2}={ct.root_page}")
+            kv = f"{sb.key_length}/{sb.value_length}"
+            roots_str = ",".join(roots) if roots else "(memtree-only)"
+            if sb.memtree_node_count and not roots:
+                roots_str = f"(memtree {sb.memtree_node_count} nodes)"
+            page_count = total_num_pages // 4096
+            print(
+                f"  [{sb.tlv_index}]  {sb.name or '?':12s}  {kv:7s}  "
+                f"0x{sb.seq:>3x}  {active_ctrees:>6d}  {total_items:>6d}  "
+                f"{page_count:>7d}  {roots_str}"
+            )
+        print()
+
+        # Walk one LDIR for the data_map (TLV[1]) for a smoke check.
+        for sb in hdr.lsm_trees:
+            if sb.tlv_index != 1 or not sb.has_disk_runs:
+                continue
+            print(f"Top-down walk of data_map (TLV[1]) ctrees:")
+            for ci, ct in enumerate(sb.ctrees):
+                if ct.offset is None:
+                    continue
+                stats = walk_ctree(r, ct, sb.key_length)
+                err = f" err={stats.error}" if stats.error else ""
+                print(
+                    f"  ctree[{ci+2}] root_page={stats.root_page}: "
+                    f"{stats.levels_visited} levels  "
+                    f"({stats.ldir_pages} LDIR + {stats.leaf_pages} LEAF), "
+                    f"per-level entries={stats.page_count_per_level}{err}"
+                )
+            break
+        print()
+
+        # File map summary.
+        summary = r.file_map_summary()
+        print("File map:")
+        print(f"  page count       : {summary['page_count']:,}")
+        print(f"  head page types  : " + ", ".join(
+            f"#{idx}=0x{t:02x}" for idx, t in summary["head_page_types"]
+        ))
+        print(f"  tail page types  : " + ", ".join(
+            f"#{idx}=0x{t:02x}" for idx, t in summary["tail_page_types"]
+        ))
+        if summary["leaf_run_pages"]:
+            print(
+                f"  LEAF region      : pages "
+                f"{summary['leaf_run_start']:,}..{summary['leaf_run_end']:,} "
+                f"(span {summary['leaf_run_pages']:,} pages, "
+                f"{summary.get('leaf_page_count', summary['leaf_run_pages']):,} of them LEAF)"
+            )
+        # Locate ARCH/ARCI distribution at the tail.
+        tail_arch = sum(1 for _, t in summary["tail_page_types"] if t == 0x01)
+        tail_arci = sum(1 for _, t in summary["tail_page_types"] if t == 0x02)
+        print(f"  tail ARCH/ARCI   : {tail_arch} ARCH, {tail_arci} ARCI in tail sample")
+    return 0
+
+
 def cmd_tibx_verify(args):
     """Walk a ``.tibx`` file and validate every page's CRC-32C envelope.
 
@@ -332,6 +443,13 @@ def main(argv=None):
              "use 0 for full file scan).",
     )
     ap.set_defaults(func=cmd_tibx_info)
+
+    ap = sub.add_parser(
+        "tibx-stat",
+        help="Show .tibx LSM-tree status (per-tree ctree summary) [experimental].",
+    )
+    ap.add_argument("tibx")
+    ap.set_defaults(func=cmd_tibx_stat)
 
     ap = sub.add_parser(
         "tibx-verify",
