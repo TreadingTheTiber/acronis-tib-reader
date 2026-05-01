@@ -25,10 +25,15 @@ from tibread.chunkmap_fs import (  # noqa: E402
     DATA_START,
     TYPE_FILE_CHUNK,
     TYPE_FILE_END,
+    META_BLOB_MAGIC,
+    META_PREAMBLE_FIXED,
+    FsFileMetadata,
+    _decode_metadata_blob,
     _sniff_extension,
     is_fs_mode_hybrid,
     walk_fs_records,
     extract_files,
+    parse_metadata_batch,
 )
 
 
@@ -162,9 +167,9 @@ class WalkAndExtractTests(unittest.TestCase):
         outdir = os.path.join(self.tmpdir, "out")
         n = extract_files(path, outdir)
         self.assertEqual(n, 3)
-        recovered = sorted(os.listdir(outdir))
+        recovered = sorted(f for f in os.listdir(outdir)
+                           if f.startswith("recovered_"))
         self.assertEqual(len(recovered), 3)
-        # Read back content (extension is sniffed; we don't care which).
         bodies = []
         for name in recovered:
             with open(os.path.join(outdir, name), "rb") as fh:
@@ -177,7 +182,8 @@ class WalkAndExtractTests(unittest.TestCase):
         path = _build_minimal_fs_tib(self.tmpdir, [big])
         outdir = os.path.join(self.tmpdir, "out")
         extract_files(path, outdir)
-        recovered = os.listdir(outdir)
+        recovered = [f for f in os.listdir(outdir)
+                     if f.startswith("recovered_")]
         self.assertEqual(len(recovered), 1)
         with open(os.path.join(outdir, recovered[0]), "rb") as fh:
             self.assertEqual(fh.read(), big)
@@ -226,14 +232,105 @@ class RealFixtureTests(unittest.TestCase):
         try:
             n = extract_files(REAL_FIXTURE, outdir, max_files=4)
             self.assertGreaterEqual(n, 4)
-            # The very first file in this archive is a small JPEG.
-            first = sorted(os.listdir(outdir))[0]
-            self.assertTrue(first.endswith(".jpg"))
-            with open(os.path.join(outdir, first), "rb") as fh:
+            # The first non-metadata file in this archive is a JPEG.
+            recovered = sorted(
+                f for f in os.listdir(outdir) if f.startswith("recovered_")
+            )
+            self.assertTrue(recovered[0].endswith(".jpg"))
+            with open(os.path.join(outdir, recovered[0]), "rb") as fh:
                 head = fh.read(3)
             self.assertEqual(head, b"\xff\xd8\xff")
         finally:
             shutil.rmtree(outdir, ignore_errors=True)
+
+    def test_metadata_batch_validation(self) -> None:
+        """Walking 50 files of the real fixture should pair >= 90% of
+        the files emitted before the second f-record with metadata
+        whose file_size matches the recovered content size."""
+        import json
+        outdir = tempfile.mkdtemp(prefix="tibread-fs-real-meta-")
+        try:
+            extract_files(REAL_FIXTURE, outdir, max_files=50)
+            sidecar = os.path.join(outdir, "metadata.jsonl")
+            self.assertTrue(os.path.exists(sidecar))
+            entries = [json.loads(l) for l in open(sidecar)]
+            # Files 1-20 should all have metadata (R1 covers them).
+            first_batch = [e for e in entries[:20]]
+            with_meta = sum(1 for e in first_batch
+                            if e["expected_size"] is not None)
+            size_match = sum(1 for e in first_batch if e["size_ok"])
+            self.assertGreaterEqual(with_meta, 18,
+                                    "expected >= 18 of 20 first-batch files "
+                                    "to have metadata paired")
+            self.assertGreaterEqual(size_match, 17,
+                                    "expected >= 17 of 20 first-batch files "
+                                    "to validate by size")
+        finally:
+            shutil.rmtree(outdir, ignore_errors=True)
+
+
+# ---- metadata-batch parser unit tests ------------------------------------
+
+
+def _build_metadata_blob(file_size: int, num_extents: int,
+                        md5: bytes = b"\x00" * 16,
+                        sd_len: int = 100,
+                        ads_name: Optional[str] = None) -> bytes:
+    """Build a synthetic metadata blob matching the on-disk layout."""
+    import struct
+    out = bytearray()
+    out.extend(META_BLOB_MAGIC)                   # +0x00
+    out.extend(struct.pack("<Q", file_size))       # +0x08
+    out.extend(struct.pack("<I", num_extents))     # +0x10
+    out.extend(b"\x00" * 8)                        # +0x14 reserved
+    out.extend(b"\x00" * 8)                        # +0x1C/+0x20 reserved
+    out.extend(b"\x00" * 4)                        # +0x24
+    out.extend(md5)                                # +0x28..+0x37
+    out.extend(b"\x00" * 8)                        # +0x38..+0x3F tail-marker
+    assert len(out) == 0x40
+    # extent table (32 B each, all zeros for synthetic test)
+    out.extend(b"\x00" * (32 * num_extents))
+    # trailer: 8 B padding + SD + (optional ADS) + 16 B trailing zeros
+    out.extend(b"\x00" * 8)
+    out.extend(b"\x01\x02\x00\x04\x80")           # SD revision + control
+    out.extend(b"\x00" * (sd_len - 5))
+    if ads_name:
+        name_bytes = ads_name.encode("utf-16-le")
+        out.extend(struct.pack("<III", 4, 0, len(name_bytes)))
+        out.extend(name_bytes)
+    out.extend(struct.pack("<Q", file_size))      # file_size_replica
+    out.extend(b"\x00" * 16)
+    return bytes(out)
+
+
+class MetadataBlobParserTests(unittest.TestCase):
+    def test_decode_basic_blob(self) -> None:
+        blob = _build_metadata_blob(file_size=12345, num_extents=3)
+        meta = _decode_metadata_blob(blob)
+        self.assertIsNotNone(meta)
+        assert meta is not None
+        self.assertEqual(meta.file_size, 12345)
+        self.assertEqual(meta.num_extents, 3)
+        self.assertEqual(len(meta.extents), 3)
+
+    def test_decode_with_ads_name(self) -> None:
+        blob = _build_metadata_blob(file_size=99, num_extents=1,
+                                    ads_name=":encryptable:$DATA")
+        meta = _decode_metadata_blob(blob)
+        self.assertIsNotNone(meta)
+        assert meta is not None
+        self.assertEqual(meta.ads_name, ":encryptable:$DATA")
+
+    def test_decode_rejects_bad_magic(self) -> None:
+        blob = b"\xde\xad\xbe\xef" + b"\x00" * 200
+        self.assertIsNone(_decode_metadata_blob(blob))
+
+    def test_decode_rejects_huge_extent_count(self) -> None:
+        import struct
+        bad = bytearray(_build_metadata_blob(0, 1))
+        # Smash num_extents to an absurd value
+        struct.pack_into("<I", bad, 0x10, 99999)
+        self.assertIsNone(_decode_metadata_blob(bytes(bad)))
 
 
 if __name__ == "__main__":
