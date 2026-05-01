@@ -79,6 +79,68 @@ class FsArchiveIndex:
 # ---------------------------------------------------------------------------
 
 
+def _read_first_bytes(f, chunk_offset: int, comp_len: int,
+                      max_bytes: int = 64) -> bytes:
+    """Inflate the first chunk of an m record to capture its leading
+    bytes (used to magic-sniff an extension for unpaired files).
+
+    Bounded by ``max_bytes`` of inflated output — we don't need a full
+    decompression, just enough for a magic check.
+    """
+    f.seek(chunk_offset + 1)
+    d = zlib.decompressobj()
+    plain = b""
+    while len(plain) < max_bytes and not d.eof:
+        buf = f.read(4096)
+        if not buf:
+            break
+        plain += d.decompress(buf, max_bytes - len(plain))
+    return plain[:max_bytes]
+
+
+def _sniff_ext_from_magic(content: bytes) -> str:
+    """Return a file extension based on content magic bytes (used as
+    a fallback for unpaired files in the directory tree)."""
+    if len(content) < 4:
+        return "bin"
+    m4 = content[:4]
+    m8 = content[:8] if len(content) >= 8 else m4
+    if m4[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if m4 == b"\x89PNG":
+        return "png"
+    if m4 == b"GIF8":
+        return "gif"
+    if m4 == b"PK\x03\x04":
+        return "zip"
+    if m4[:2] == b"MZ":
+        return "exe"
+    if m4 == b"%PDF":
+        return "pdf"
+    if m8 == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+        return "doc"   # Office Compound File (doc/xls/ppt/Thumbs.db)
+    if len(content) >= 12 and content[4:8] == b"ftyp":
+        return "mp4"
+    if m4 == b"OggS":
+        return "ogg"
+    if m4 == b"fLaC":
+        return "flac"
+    if content[:2] == b"BM":
+        return "bmp"
+    if m4 == b"RIFF":
+        return "wav"
+    if m4 == b"\x7fELF":
+        return "elf"
+    if content[:5] == b"<?xml":
+        return "xml"
+    if content[:5] == b"<!DOC" or content[:5] == b"<html":
+        return "html"
+    sample = content[:64]
+    if sample and all(b in (9, 10, 13) or 32 <= b < 127 for b in sample):
+        return "txt"
+    return "bin"
+
+
 def _normalize_path(p: str) -> str:
     """Strip drive letter, replace backslashes with forward, drop leading /."""
     if len(p) >= 2 and p[1] == ":":
@@ -283,6 +345,7 @@ def build_index(tib_path: str, *, progress: bool = False) -> FsArchiveIndex:
         cur_offsets: List[int] = []
         cur_comp_lens: List[int] = []
         cur_size = 0
+        cur_first_bytes: Optional[bytes] = None
         files: List[FsFileEntry] = []
         last_progress = time.monotonic()
 
@@ -317,6 +380,12 @@ def build_index(tib_path: str, *, progress: bool = False) -> FsArchiveIndex:
                     cur_offsets.append(cur)
                     cur_comp_lens.append(comp_len)
                     cur_size += plain_len
+                    # Capture the first-chunk plain prefix for magic
+                    # sniff if we ever fail to pair this file.
+                    if len(cur_offsets) == 1 and cur_first_bytes is None:
+                        cur_first_bytes = _read_first_bytes(
+                            f, cur, comp_len, max_bytes=64
+                        )
                 else:  # TYPE_FILE_END
                     if cur_offsets:
                         bucket = by_size.get(cur_size)
@@ -325,7 +394,11 @@ def build_index(tib_path: str, *, progress: bool = False) -> FsArchiveIndex:
                             path = _normalize_path(dir_rec.fullpath)
                             paired += 1
                         else:
-                            path = f"_unpaired_/recovered_{len(files)+1:06d}"
+                            ext = _sniff_ext_from_magic(cur_first_bytes or b"")
+                            path = (
+                                f"_unpaired_/recovered_"
+                                f"{len(files)+1:06d}.{ext}"
+                            )
                             unpaired += 1
                         files.append(FsFileEntry(
                             path=path,
@@ -336,6 +409,7 @@ def build_index(tib_path: str, *, progress: bool = False) -> FsArchiveIndex:
                         cur_offsets = []
                         cur_comp_lens = []
                         cur_size = 0
+                        cur_first_bytes = None
                         if progress and time.monotonic() - last_progress > 2.0:
                             pct = 100.0 * cur / concat_end
                             print(f"[tibread]   indexing {pct:5.1f}%  "
