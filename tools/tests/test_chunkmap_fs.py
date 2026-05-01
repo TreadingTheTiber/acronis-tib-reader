@@ -30,7 +30,11 @@ from tibread.chunkmap_fs import (  # noqa: E402
     FsFileMetadata,
     _decode_metadata_blob,
     _sniff_extension,
+    decode_directory_tree,
+    extract_paths_from_tree,
     is_fs_mode_hybrid,
+    is_likely_file_path,
+    locate_directory_tree,
     walk_fs_records,
     extract_files,
     parse_metadata_batch,
@@ -240,6 +244,43 @@ class RealFixtureTests(unittest.TestCase):
             with open(os.path.join(outdir, recovered[0]), "rb") as fh:
                 head = fh.read(3)
             self.assertEqual(head, b"\xff\xd8\xff")
+        finally:
+            shutil.rmtree(outdir, ignore_errors=True)
+
+    def test_directory_tree_decode(self) -> None:
+        """The reference fixture's directory tree should decode and yield
+        well-known paths starting in C:/Documents and Settings/All Users/..."""
+        meta_blob, tree = decode_directory_tree(REAL_FIXTURE)
+        # Metadata blob should start with TLV-style bytes (the metainfo
+        # XML container; not specific magic).
+        self.assertGreater(len(meta_blob), 100)
+        self.assertGreater(len(tree), 1_000_000)
+        paths = extract_paths_from_tree(tree)
+        self.assertGreater(len(paths), 100_000)
+        # First path should look like a Windows file path.
+        first_files = [p for p in paths if is_likely_file_path(p)]
+        self.assertGreater(len(first_files), 100_000)
+        self.assertTrue(first_files[0].startswith("C:/"),
+                        f"unexpected first path: {first_files[0]!r}")
+        # Common extensions should be present.
+        all_text = "\n".join(first_files[:1000]).lower()
+        for ext in (".jpg", ".mov"):
+            self.assertIn(ext, all_text)
+
+    def test_extract_pairs_with_original_paths(self) -> None:
+        """Extracting the first 4 files should produce a metadata.jsonl
+        whose entries carry the recovered original_path field."""
+        import json
+        outdir = tempfile.mkdtemp(prefix="tibread-fs-paths-")
+        try:
+            extract_files(REAL_FIXTURE, outdir, max_files=4)
+            sidecar = os.path.join(outdir, "metadata.jsonl")
+            entries = [json.loads(l) for l in open(sidecar)]
+            self.assertEqual(len(entries), 4)
+            for e in entries:
+                self.assertIsNotNone(e.get("original_path"),
+                                     "original_path should be populated")
+                self.assertIn("/", e["original_path"])
         finally:
             shutil.rmtree(outdir, ignore_errors=True)
 
