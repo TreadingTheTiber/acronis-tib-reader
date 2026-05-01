@@ -18,7 +18,7 @@ from .ntfs import NtfsVolume
 from .indexer import build_index, open_tib
 from .chunkmap_locator import discover_chunkmap_offset, detect_format_era
 from .chunkmap import decode_chunk_map
-from .tibx import TibxReader
+from .tibx import TibxReader, TibxDiskAdapter
 
 __version__ = "0.1.0"
 
@@ -31,4 +31,5 @@ __all__ = [
     "detect_format_era",
     "decode_chunk_map",
     "TibxReader",
+    "TibxDiskAdapter",
 ]
