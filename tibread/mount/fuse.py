@@ -35,20 +35,21 @@ except (ImportError, OSError):
 from ..indexer import open_tib
 
 
-# Header bytes used to detect a `.tibx` ("QARCH") page-store regardless
-# of the file extension. Page 0 begins with the 4-byte page-CRC envelope
-# followed by the type byte (0x01 = ARCH) and the magic ASCII "QARCH".
-# We sniff for "QARCH" anywhere in the first 16 bytes so we don't have
-# to commit to a precise envelope layout here.
-_TIBX_MAGIC = b"QARCH"
+# Header bytes used to detect a `.tibx` page-store regardless of file
+# extension. The page envelope is `[0x41 type 0x00 0x00][u32 CRC32C]`,
+# then the inner magic at offset 8 (ARCH for the master archive page,
+# LEAF/LDIR for slice-continuation files like `*-NNNN.tibx`).
+# Earlier versions detected "QARCH at offset 7" which only matched
+# files where the page-CRC happened to end in 0x51 ('Q') — pure
+# coincidence.
 
 
 def is_tibx_file(path: str) -> bool:
     """Return True if *path* looks like a ``.tibx`` archive.
 
-    Detection is by file extension *or* by the ``QARCH`` magic in the
-    first 16 bytes of page 0.  Either is sufficient — both make false
-    positives extremely unlikely.
+    Detection is by file extension *or* by the page-envelope shape on
+    page 0 (`0x41 <type> 0x00 0x00 <CRC32> <magic>` where magic is
+    ARCH/LEAF/LDIR).
     """
     if path.lower().endswith(".tibx"):
         return True
@@ -57,7 +58,14 @@ def is_tibx_file(path: str) -> bool:
             head = f.read(16)
     except OSError:
         return False
-    return _TIBX_MAGIC in head
+    if len(head) < 12:
+        return False
+    return (
+        head[0] == 0x41
+        and head[2] == 0
+        and head[3] == 0
+        and head[8:12] in (b"ARCH", b"LEAF", b"LDIR")
+    )
 
 
 class _NtfsFS(Operations if FUSE else object):

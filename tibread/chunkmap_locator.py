@@ -105,15 +105,49 @@ def _read_volume_header(f) -> Tuple[int, int]:
     buf = f.read(32)
     magic, hdrlen, version = struct.unpack_from("<IHH", buf, 0)
 
-    # Detect .tibx (TIB eXtended, TI 2020+): "QARCH" at offset 7.
-    if buf[7:12] == b"QARCH":
-        raise UnsupportedTibFormat(
-            ".tibx (TIB eXtended) is not supported by this reader. "
-            ".tibx is a different container format introduced with Acronis "
-            "True Image 2020+ and uses an SQLite-backed archive layout. "
-            "tibread currently supports sector-mode .tib only "
-            "(magic 0xA2B924CE)."
-        )
+    # Detect .tibx (TIB eXtended, TI 2020+) by its page envelope:
+    #   byte 0 = 0x41 ('A'), byte 1 = page-type tag, byte 2 = 0,
+    #   bytes 4..7 = u32 CRC-32C (varies per file),
+    #   bytes 8..11 = ASCII signature for that page type.
+    # The page-type byte tells us:
+    #   0x01 ARCH page (master archive): ASCII "ARCH" at offset 8
+    #   0x02 ARCI commit-index (rare to be page 0)
+    #   0x03 LEAF page — typical of slice-continuation files (-0002.tibx,
+    #         etc. that ship alongside a master)
+    #   0x04 LDIR page — likewise a slice-continuation
+    # The earlier "QARCH at offset 7" detection was a coincidence — the
+    # example sample's CRC happened to end in 0x51 ('Q'). Real detection
+    # is the magic at offset 8 plus the page-envelope shape.
+    # .tibx page envelope: byte 0 = 0x41 ('A'), bytes 2-3 = 0, bytes 4-7 = CRC32C.
+    # Page-type byte at offset 1 distinguishes:
+    #   0x01 ARCH  master archive header (the only kind of file standalone-openable)
+    #   0x02 ARCI  commit-index page
+    #   0x03 LEAF  LSM tree leaf
+    #   0x04 LDIR  LSM tree directory
+    #   0x05       Golomb dedup filter
+    #   0xff       SG segment data
+    # Slice-continuation files (`*-NNNN.tibx`) start with any of 0x02..0xff.
+    if buf[0] == 0x41 and buf[2] == 0 and buf[3] == 0 and buf[1] in (0x01, 0x02, 0x03, 0x04, 0x05, 0xff):
+        page_type = buf[1]
+        if page_type == 0x01 and buf[8:12] == b"ARCH":
+            raise UnsupportedTibFormat(
+                ".tibx (TIB eXtended) sector-mode reader for the master "
+                "archive page is in tibread.tibx, not this module. Use "
+                "TibxReader or `tib tibx-info` instead. (Detected ARCH "
+                "page-type=0x01 at offset 8 + 0x41 page envelope at 0.)"
+            )
+        else:
+            ptype_name = {
+                0x01: "ARCH", 0x02: "ARCI", 0x03: "LEAF", 0x04: "LDIR",
+                0x05: "GOLOMB", 0xff: "DATA",
+            }.get(page_type, f"0x{page_type:02x}")
+            raise UnsupportedTibFormat(
+                f".tibx slice-continuation file detected (page-type {page_type:#x} "
+                f"= {ptype_name}). These auxiliary files (`*-NNNN.tibx`) ship "
+                f"alongside a master .tibx (the file WITHOUT a numeric suffix); "
+                f"open the master file instead — tibread will load the slices "
+                f"automatically when needed."
+            )
     # Filesystem-mode .tib variants — known but not yet implemented.
     if magic == 0x44686EB4:
         raise UnsupportedTibFormat(

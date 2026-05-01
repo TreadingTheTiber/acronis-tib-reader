@@ -147,28 +147,23 @@ def read_lba_range(
     start_byte = start_lba * sector_size
     end_byte = start_byte + length
 
-    if end_byte > BOOTSTRAP_LEN:
-        raise ChunkMapNotImplemented(
-            f"read_lba_range: range [{start_byte}, {end_byte}) extends past "
-            f"the bootstrap segment ([0, {BOOTSTRAP_LEN})). The segment_map "
-            f"LSM tree walker is required for arbitrary random access and "
-            f"is not yet implemented (see tibread.tibx.lsm.parse_leaf)."
-        )
-
     seg = _bootstrap_segment(reader)
     if seg is None:
         raise IOError("no SG segment found in archive head — file may be malformed")
-    if seg.length < BOOTSTRAP_LEN:
-        raise IOError(
-            f"first SG segment is unexpectedly short ({seg.length} bytes); "
-            f"expected at least {BOOTSTRAP_LEN}"
-        )
 
+    # The first SG segment's actual decompressed size is the de-facto
+    # bootstrap window. It's typically ≥256 KB but can be smaller (we've
+    # seen 180 KB in the wild). If the requested range fits, serve it
+    # from segment 0; otherwise we'd need the segment_map LSM walker.
     plaintext = reader.decompress_segment(seg)
-    if len(plaintext) < end_byte:
-        raise IOError(
-            f"bootstrap segment shorter than expected: "
-            f"have {len(plaintext)} bytes, need {end_byte}"
+    available = len(plaintext)
+    if end_byte > available:
+        raise ChunkMapNotImplemented(
+            f"read_lba_range: range [{start_byte}, {end_byte}) extends past "
+            f"the first SG segment's {available} bytes. Larger reads need "
+            f"the segment_map LSM-tree walker (TibxDiskAdapter handles this "
+            f"when given a partition_offset; otherwise see "
+            f"tibread.tibx.disk_adapter.TibxDiskAdapter)."
         )
     return plaintext[start_byte:end_byte]
 

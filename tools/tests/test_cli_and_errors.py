@@ -104,8 +104,12 @@ class UnsupportedFormatTests(unittest.TestCase):
         self.assertIn("magic", str(ctx.exception).lower())
 
     def test_tibx_format_raises_unsupported_format(self):
-        # .tibx signature: 7 zero bytes, then ASCII "QARCH" at offset 7.
-        path = self._make(b"\x00" * 7 + b"QARCH" + b"\x00" * 256)
+        # .tibx page envelope: 0x41 <type=01 ARCH> 0x00 0x00 + 4 CRC bytes,
+        # then ASCII "ARCH" at offset 8 (NOT "QARCH" — the leading "Q" in
+        # one early sample was a CRC coincidence).
+        path = self._make(
+            b"\x41\x01\x00\x00" + b"\xde\xad\xbe\xef" + b"ARCH" + b"\x00" * 256
+        )
         with self.assertRaises(UnsupportedTibFormat) as ctx:
             discover_chunkmap_offset(path)
         msg = str(ctx.exception)

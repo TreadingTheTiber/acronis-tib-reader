@@ -80,10 +80,11 @@ class IsTibxFileTests(unittest.TestCase):
 
     def test_magic_in_renamed_file(self) -> None:
         """A ``.tibx`` renamed to ``.bin`` is still detected by magic."""
-        # Mimic a real page-0 layout: 4-byte CRC envelope + type + magic.
+        # Page-0 envelope: 0x41 <type=01 ARCH> 0x00 0x00 [4-byte CRC]
+        # then ASCII "ARCH" at offset 8.
         path = os.path.join(self.tmpdir, "renamed.bin")
         with open(path, "wb") as f:
-            f.write(b"\xde\xad\xbe\xef\x01" + b"QARCH" + b"\x00" * 6)
+            f.write(b"\x41\x01\x00\x00" + b"\xde\xad\xbe\xef" + b"ARCH")
         self.assertTrue(mount_fuse.is_tibx_file(path))
 
     def test_no_magic_no_tibx_extension(self) -> None:
@@ -211,7 +212,7 @@ class FuseMountRoutingTests(unittest.TestCase):
     def test_tibx_file_routes_to_tibx_adapter(self) -> None:
         tibx_path = os.path.join(self.tmpdir, "backup.tibx")
         with open(tibx_path, "wb") as f:
-            f.write(b"\x00\x00\x00\x00\x01QARCH" + b"\x00" * 6)
+            f.write(b"\x41\x01\x00\x00" + b"\xde\xad\xbe\xef" + b"ARCH")
 
         fake_vol = mock.MagicMock()
         fake_vol.total_files = 7
