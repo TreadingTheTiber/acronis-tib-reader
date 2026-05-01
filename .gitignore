@@ -26,3 +26,12 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# RE-time recon scripts and their outputs (not part of the public package)
+/tibread/tibx_magic_scanner.py
+/tools/scan_tibx.py
+/tools/scan_tibx_report.json
+/tools/scan.log
+/docs/legacy/tibx_magic_*.json
+/docs/legacy/tibx_magic_*.txt
+/docs/legacy/tibx_magic_*.log
