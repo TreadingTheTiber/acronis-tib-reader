@@ -273,11 +273,14 @@ def _read_trailer(f, file_size: int) -> Tuple[int, int, int, int]:
         if magic == TRAILER_FS:
             raise UnsupportedTibFormat(
                 "this .tib has a sector-mode volume header (magic 0xA2B924CE) "
-                "but a filesystem-mode trailer (magic 0x94E18A2C). This hybrid "
-                "layout is produced by some Acronis True Image variants when "
-                "backing up file shares (rather than block devices). It is not "
-                "yet supported — the chunk-map walker for FS-mode trailers "
-                "needs to be implemented."
+                "but a filesystem-mode trailer (magic 0x94E18A2C). This is "
+                "the layout Acronis True Image produces when backing up a "
+                "file share (NAS / SMB) rather than a block device. The "
+                "block-device-style chunk map this code expects does not "
+                "exist for this variant. To recover the file CONTENT (without "
+                "original filenames — those live in `f` directory records we "
+                "haven't reverse-engineered yet) run: "
+                "`tib extract-fs <tib> <output-dir>`."
             )
         raise UnsupportedTibFormat(
             f"unrecognized .tib trailer magic {magic.hex()} "
