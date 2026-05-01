@@ -64,7 +64,9 @@ def compute_header_adler32(path: str) -> tuple[bool, int, int]:
         raise ValueError(f"{path}: file too small ({len(head)} bytes)")
     magic, hdr_len, _version = struct.unpack_from("<IHH", head, 0)
     # Detect .tibx and other non-.tib formats with helpful messages.
-    if head[7:12] == b"QARCH":
+    # .tibx detection: page envelope shape + ARCH/LEAF/LDIR magic at offset 8.
+    # See chunkmap_locator._read_volume_header for the rationale.
+    if head[0] == 0x41 and head[2] == 0 and head[8:12] in (b"ARCH", b"LEAF", b"LDIR"):
         from .chunkmap_locator import UnsupportedTibFormat
         raise UnsupportedTibFormat(
             ".tibx (TIB eXtended) is not supported by this reader."
