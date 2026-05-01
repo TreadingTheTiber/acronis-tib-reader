@@ -63,6 +63,16 @@ from .lsm import (
     walk_lsm_region,
     walk_lsm_tree,
 )
+from .chains import (
+    Slice,
+    enumerate_slices,
+    find_slice_by_uuid,
+    iter_chains,
+    parse_slice_record,
+    slice_features,
+    slice_type_from_flags,
+    walk_chain_from_uuid,
+)
 
 __all__ = [
     "TibxReader",
@@ -111,4 +121,13 @@ __all__ = [
     "walk_ctree",
     "walk_lsm_region",
     "walk_lsm_tree",
+    # Chain / slice enumeration (chains.py)
+    "Slice",
+    "enumerate_slices",
+    "find_slice_by_uuid",
+    "iter_chains",
+    "parse_slice_record",
+    "slice_features",
+    "slice_type_from_flags",
+    "walk_chain_from_uuid",
 ]

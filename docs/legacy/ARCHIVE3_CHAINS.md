@@ -121,36 +121,70 @@ TLV[5] slices  ver=2  ctree_count=3  mem_nodes=2  ctree[2..N]=EMPTY
    memtree_encoding=1 (LZ4)  memtree_extra_len=112  memtree_pages_total=1
 ```
 
-Two slices, both held in the **residual mem-tree** (no on-disk ctree
-LEAF page). The residual mem-tree is LZ4-compressed and lives in the
-extra payload of the L-SB record (`L-SB[0x178 .. 0x178 + extra_len]`).
+Two **cells** in the residual mem-tree — but `mem_nodes` counts all
+cells including tombstones, not just alive records.  See "Empirical
+mem-tree decode" below.  No on-disk ctree LEAF page; everything is in
+the residual mem-tree (LZ4-compressed extra payload of the L-SB
+record at `L-SB[0x178 .. 0x178 + extra_len]`).
 
-Decompressed payload (144 bytes):
+### Empirical mem-tree decode
 
-```
-0200000200000001 0000000200_9f7aefd07fadc35a0e9cc76eb19776db_0000018647bf998f
-0000018647c9dc5f 000000165d835bcf 00000011c810e000 0000000100000000
-0000000700000000 010000000000058e d40000000000000c b53510...zeros...
-```
+`[CONFIRMED]` (Apr 2026 chains agent) — the mem-tree blob is a single
+LZ4 multi-block frame whose decompressed body is the **same compact
+cell stream** used by LEAF pages.  It can be decoded directly with
+`lsm_cells.decode_cells_compact(buf, count=mem_nodes, fixed_key_size=4,
+fixed_val_size=132)`.
 
-* `00 00 01 86 47 bf 99 8f` = BE u64 = 1681740161423 (Unix-ms) ≈
-  2023-04-17 18:42 UTC — slice timestamp #1 ✓ matches the archive's
-  `created_unix_ms` reported by `read_arch_header`.
-* `00 00 01 86 47 c9 dc 5f` = BE u64 = 1681741053023 ≈ 15 minutes
-  later — slice timestamp #2.
-* `9f 7a ef d0 7f ad c3 5a 0e 9c c7 6e b1 97 76 db` — looks like a
-  random 16-byte UUID (slice UUID).
-* The leading `0x02 0x00 0x00 0x02 0x00 0x00 0x00 0x01 0x00 0x00 0x00 0x02`
-  is consistent with `(node_count=2, slice_id_lo=1, slice_id_hi=2)` —
-  the 2 slices in this chain are `slice_id=1` (FULL) and `slice_id=2`
-  (INC or DIFF — the type bit is hidden in the flags byte at +0x44 of
-  each record, which we cannot extract without an mem-tree decoder).
+For `example.tibx` this yields:
 
-`[INFERRED]` Mem-tree serialization is `lsm_records_to_tree`
-(`FUN_180043d10`) format and is partly variable-stride. A full
-decoder is in flight (companion agent's `lsm_cells.py`). For now,
-on-disk LEAF pages can be decoded with the byte-precise format in §3
-once a chain has compacted past the mem-tree.
+| cell | alive? | key (BE u32 slice_id) | value         |
+|-----:|--------|-----------------------|---------------|
+| 0    | NO (tombstone) | `slice_id=1`   | (no bytes)    |
+| 1    | YES            | `slice_id=2`   | 132-byte slice record |
+
+i.e. **the archive currently holds one alive slice (id=2)** plus a
+tombstone for `slice_id=1`.  The "two slices in this chain" claim
+that appeared in earlier drafts of this document was incorrect: the
+mem-tree's `node_count` field counts every cell ever written, including
+tombstones, not the count of currently-alive slice records.
+
+The 132-byte value parses cleanly per §3 below for the **first 0x44
+bytes** (UUID + ts_a + ts_b + the 16-byte +0x20 region + features +
+counters + flags byte).  Empirical timestamps:
+
+* `ts_a` (offset +0x10) = `0x00000186_47bf998f` = **1676240984463 ms**
+  = 2023-02-12 22:29:44 UTC ✓ (matches the file mtime within
+  ~12 minutes).
+* `ts_b` (offset +0x18) = `0x00000186_47c9dc5f` = **1676241656927 ms**
+  = 2023-02-12 22:40:56 UTC.
+* `slice_uuid` (offset +0x00) = `9f7aefd07fadc35a0e9cc76eb19776db`.
+* `flags_byte` (offset +0x44) = `0x01` → type=INC (bit 0 ∈ 0x73 mask).
+
+Two correctness caveats to the byte map in §3:
+
+1. **`slice_id` field at +0x4d is zero in mem-tree records.**  The
+   authoritative slice_id is the LSM **key**, not the in-record copy;
+   readers should always trust the key.  (The in-record field may be
+   populated only after compaction to an on-disk LEAF, or it may
+   simply be vestigial.)
+2. **The 16 bytes at +0x20..+0x30 may not be a parent UUID** in this
+   archive.  In the empirical record, those bytes are
+   `00000016_5d835bcf 00000011_c810e000` — two BE u64 values that
+   look more like byte-counts (≈96 GB and ≈76 GB; both larger than
+   the 54 GB on-disk archive) than a random UUID.  The
+   `ar_slice_to_disk` decompile only proves the field is "16 bytes
+   copied verbatim from `mem[0x40..0x50]`"; the "parent UUID"
+   interpretation in §3 / §4.1 is an inference from the comment in
+   the disassembly, not a guaranteed semantic.  `chains.py` exposes
+   the field as raw `parent_uuid` bytes and treats `is_full` as
+   "either the type bits say full **or** the field is all-zero" so
+   downstream callers can be tolerant.
+
+The earlier draft of this section claimed timestamps in April 2023
+(`0x18647bf998f` ≈ 1681740161423 ms ≈ Apr 17).  That was a
+**misalignment error**: April 17 corresponds to BE u64
+`0x00000187_...`; the actual stored value is `0x00000186_...`, which
+is February 12.  The correct interpretation matches the file mtime.
 
 ---
 

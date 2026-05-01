@@ -13,6 +13,7 @@ Subcommands:
   tib tibx-verify <tibx>               Validate every page's CRC-32C; report mismatches.
   tib tibx-mount <tibx>                Probe NTFS via .tibx-backed disk adapter [experimental].
   tib tibx-volumes <tibx>              Show .tibx volume_table (TLV[18]) cross-checked vs. MBR.
+  tib tibx-chain <tibx>                Enumerate slices / backup chain in a .tibx file.
 
 Examples:
   tib info backup_full_b1_s1_v1.tib
@@ -640,6 +641,87 @@ def cmd_tibx_volumes(args):
     return 0
 
 
+def cmd_tibx_chain(args):
+    """Print every slice in a ``.tibx`` archive's backup chain(s).
+
+    Walks TLV[5] (the slices LSM tree at ``arch+0x10b8``) — both the
+    on-disk ctrees and the residual mem-tree — and prints one row per
+    alive slice: slice_id, type, UUID, parent UUID, ctime/mtime.
+
+    The chain root (FULL backup) is highlighted with a ``*`` marker.
+    """
+    import datetime as dt
+
+    from .tibx import TibxReader, enumerate_slices, iter_chains, read_archive_header
+
+    print(f"tibx file: {args.tibx}")
+    with TibxReader(args.tibx) as r:
+        hdr = read_archive_header(r)
+        slices_sb = next((sb for sb in hdr.lsm_trees if sb.tlv_index == 5), None)
+        if slices_sb is None:
+            print("  ERROR: no slices L-SB (TLV[5]) in archive header")
+            return 2
+        active_ctrees = sum(1 for c in slices_sb.ctrees if c.offset is not None)
+        print(
+            f"  TLV[5] slices  ver=2  k/v={slices_sb.key_length}/{slices_sb.value_length}"
+            f"  ctrees_alive={active_ctrees}"
+            f"  memtree_nodes={slices_sb.memtree_node_count}"
+            f"  memtree_extra_len={slices_sb.memtree_extra_len}"
+        )
+        print()
+
+        slices = enumerate_slices(r)
+        if not slices:
+            print("  (no alive slice records found)")
+            return 0
+
+        def _fmt_ts(ms: int) -> str:
+            if not ms:
+                return "(unset)"
+            try:
+                return dt.datetime.fromtimestamp(
+                    ms / 1000, dt.timezone.utc
+                ).strftime("%Y-%m-%d %H:%M:%S UTC")
+            except (OSError, ValueError, OverflowError):
+                return f"(invalid ts: {ms})"
+
+        print(f"Slices ({len(slices)} total):")
+        for s in slices:
+            marker = "*" if s.is_full else " "
+            features = ",".join(s.features) if s.features else "-"
+            print(
+                f"  {marker} slice_id={s.slice_id:<4d} type={s.slice_type:<7s} "
+                f"flags=0x{s.flags:02x}  features={features}"
+            )
+            print(f"      uuid       : {s.uuid_hex}")
+            print(f"      parent_uuid: {s.parent_uuid_hex}")
+            print(f"      ctime      : {_fmt_ts(s.ctime)}  ({s.ctime} ms)")
+            print(f"      mtime      : {_fmt_ts(s.mtime)}  ({s.mtime} ms)")
+        print()
+        print("  ('*' marks chain root — FULL backup with parent_uuid==0)")
+
+        # Group into chains.
+        chains = list(iter_chains(r))
+        if len(chains) > 1 or (chains and len(chains[0]) != len(slices)):
+            print()
+            print(f"Chain grouping ({len(chains)} chain(s)):")
+            for i, chain in enumerate(chains):
+                root = chain[0] if chain else None
+                if root is None:
+                    continue
+                kind = "FULL chain" if root.is_full else "orphan slices"
+                print(
+                    f"  Chain {i}: {kind} starting at slice_id={root.slice_id} "
+                    f"({root.uuid_hex})"
+                )
+                for s in chain:
+                    print(
+                        f"    -> slice_id={s.slice_id} type={s.slice_type} "
+                        f"uuid={s.uuid_hex}"
+                    )
+    return 0
+
+
 def cmd_mount(args):
     try:
         from .mount.fuse import fuse_mount
@@ -747,6 +829,13 @@ def main(argv=None):
     )
     ap.add_argument("tibx")
     ap.set_defaults(func=cmd_tibx_volumes)
+
+    ap = sub.add_parser(
+        "tibx-chain",
+        help="Enumerate the backup chain (slices) inside a .tibx file.",
+    )
+    ap.add_argument("tibx")
+    ap.set_defaults(func=cmd_tibx_chain)
 
     ap = sub.add_parser("mount", help="Mount the .tib's NTFS volume read-only.")
     ap.add_argument("tib")
