@@ -33,6 +33,9 @@ from .format import (
     PAGE_TYPE_ARCH,
     PAGE_TYPE_DATA,
     SG_HEADER_OFFSET,
+    compute_page_crc32,
+    crc32c,
+    read_stored_page_crc32,
 )
 from .segment import (
     SgSegment,
@@ -50,6 +53,81 @@ _PRINTABLE_RUN_RE = re.compile(rb"[\x20-\x7e]{6,}")
 _GUID_RE = re.compile(
     rb"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
 )
+
+
+class TibxPageCrcError(IOError):
+    """Raised when a page's stored CRC does not match the computed CRC.
+
+    Carries the page index, the stored CRC, and the (re-)computed CRC so
+    callers can decide whether to retry with FEC, log, or surface a
+    user-visible corruption error.
+    """
+
+    def __init__(self, page_idx: int, stored: int, computed: int) -> None:
+        self.page_idx = page_idx
+        self.stored = stored
+        self.computed = computed
+        super().__init__(
+            f"page {page_idx}: CRC mismatch "
+            f"(stored=0x{stored:08x}, computed=0x{computed:08x})"
+        )
+
+
+def _attempt_single_bit_fec(page: bytes, stored: int) -> Optional[tuple[bytes, str]]:
+    """Try to recover ``page`` from a single-bit corruption.
+
+    Returns ``(corrected_page_bytes, description)`` on success, or
+    ``None`` if no single-bit flip restores the stored CRC.
+
+    Two cases (matching the C implementation in archive3.dll):
+      1. The bit-flip is in the stored CRC field itself — detected by
+         testing whether ``stored XOR computed`` has popcount 1.
+      2. The bit-flip is somewhere in the 4096-byte page body — brute-
+         forced by walking every (byte, bit) position and recomputing
+         the page CRC.
+    """
+    # Case 1: bit flip in the stored CRC.
+    buf = bytearray(page)
+    buf[4:8] = b"\x00\x00\x00\x00"
+    computed = crc32c(bytes(buf))
+    diff = computed ^ stored
+    if diff != 0 and (diff & (diff - 1)) == 0:
+        # Single bit set in the difference => the page payload is fine,
+        # only the on-disk CRC field is wrong.  Patch it.
+        fixed = bytearray(page)
+        fixed[4:8] = computed.to_bytes(4, "big")
+        return bytes(fixed), f"bit flip in stored CRC field (diff=0x{diff:08x})"
+
+    # Case 2: bit flip in the body.  Try every byte and every bit.
+    # We work on the page with the CRC field already zeroed because
+    # ``computed`` was calculated that way.  When we hit a candidate we
+    # apply the flip to the *original* page (preserving the stored CRC
+    # value as well).
+    for byte_idx in range(PAGE_SIZE):
+        # Skip the CRC field — case 1 already covered single-bit flips
+        # there, and any flip here would also change the post-zero-fill
+        # CRC computation, but case 1 has tighter logic.
+        if 4 <= byte_idx < 8:
+            continue
+        original_byte = buf[byte_idx]
+        for bit in range(8):
+            buf[byte_idx] = original_byte ^ (1 << bit)
+            cand = crc32c(bytes(buf))
+            if cand == stored:
+                # Apply to the real page bytes.
+                fixed = bytearray(page)
+                fixed[byte_idx] ^= 1 << bit
+                desc = (
+                    f"single-bit flip at byte 0x{byte_idx:03x} bit {bit} "
+                    f"(value {(original_byte >> bit) & 1} -> "
+                    f"{((original_byte ^ (1 << bit)) >> bit) & 1})"
+                )
+                # Restore buf for cleanliness (not strictly needed).
+                buf[byte_idx] = original_byte
+                return bytes(fixed), desc
+        buf[byte_idx] = original_byte
+
+    return None
 
 
 class TibxReader:
@@ -131,34 +209,127 @@ class TibxReader:
             )
         return page
 
-    def read_page(self, page_idx: int) -> tuple[int, bytes]:
+    def read_page(
+        self,
+        page_idx: int,
+        *,
+        validate_crc: bool = True,
+        attempt_fec: bool = False,
+    ) -> tuple[int, bytes]:
         """Return ``(page_type, body_bytes)`` for one page.
 
         ``body_bytes`` is the 4088-byte body following the 8-byte
-        envelope.  The 4-byte stored "checksum" field at envelope
-        offset 4 is not validated — its hash algorithm is not yet
-        empirically nailed down, and the format spec leaves it as
-        opaque "page checksum (LE)".  Callers that need the raw
-        envelope bytes should use :meth:`read_raw_page`.
+        envelope.  The CRC is **CRC-32C (Castagnoli)** stored big-endian
+        at envelope offset 0x04, computed over the whole 4 KiB page with
+        that field zero-filled.
+
+        Parameters
+        ----------
+        page_idx : int
+            Page number to read.
+        validate_crc : bool, optional
+            If True (default), verify the page's stored CRC matches the
+            computed CRC.  Raises :class:`TibxPageCrcError` on mismatch
+            unless ``attempt_fec=True`` recovers a single-bit corruption.
+        attempt_fec : bool, optional
+            If True, on CRC mismatch attempt brute-force single-bit
+            recovery (matches the algorithm in ``archive3.dll``).  Only
+            consulted when ``validate_crc=True``.  Defaults to False
+            (fail fast on corruption).
         """
         page = self._raw_read_page(page_idx)
         if page[0] != 0x41:
             raise IOError(
                 f"page {page_idx} does not start with 0x41 magic (got 0x{page[0]:02x})"
             )
+        if validate_crc:
+            page = self._validate_or_recover_crc(
+                page_idx, page, attempt_fec=attempt_fec
+            )
         page_type = page[1]
         return page_type, page[ENVELOPE_SIZE:]
 
-    def read_raw_page(self, page_idx: int) -> bytes:
-        """Return the full 4096 raw bytes of one page (envelope included)."""
-        return self._raw_read_page(page_idx)
+    def read_raw_page(
+        self,
+        page_idx: int,
+        *,
+        validate_crc: bool = False,
+        attempt_fec: bool = False,
+    ) -> bytes:
+        """Return the full 4096 raw bytes of one page (envelope included).
+
+        Parameters
+        ----------
+        page_idx : int
+            Page number to read.
+        validate_crc : bool, optional
+            If True, verify the CRC.  Defaults to False because most
+            callers of this low-level helper want the raw bytes for
+            inspection regardless of whether the page validates.
+        attempt_fec : bool, optional
+            See :meth:`read_page`.
+        """
+        page = self._raw_read_page(page_idx)
+        if validate_crc:
+            page = self._validate_or_recover_crc(
+                page_idx, page, attempt_fec=attempt_fec
+            )
+        return page
 
     def page_envelope(self, page_idx: int) -> tuple[int, int]:
-        """Return ``(page_type, stored_checksum)`` from the envelope."""
+        """Return ``(page_type, stored_checksum)`` from the envelope.
+
+        ``stored_checksum`` is the page's CRC-32C as stored on disk —
+        i.e. the big-endian u32 at envelope offset 0x04, returned as a
+        Python int.
+        """
         page = self._raw_read_page(page_idx)
         page_type = page[1]
-        checksum = struct.unpack("<I", page[4:8])[0]
+        checksum = read_stored_page_crc32(page)
         return page_type, checksum
+
+    # ------------------------------------------------------------------ #
+    # CRC validation / FEC
+    # ------------------------------------------------------------------ #
+
+    def _validate_or_recover_crc(
+        self,
+        page_idx: int,
+        page: bytes,
+        *,
+        attempt_fec: bool,
+    ) -> bytes:
+        """Validate the CRC; on mismatch optionally attempt single-bit FEC.
+
+        Returns the (possibly corrected) 4 KiB page bytes.  Raises
+        :class:`TibxPageCrcError` if the CRC does not match and FEC was
+        either disabled or unable to recover.
+        """
+        stored = read_stored_page_crc32(page)
+        computed = compute_page_crc32(page)
+        if computed == stored:
+            return page
+        if attempt_fec:
+            recovery = _attempt_single_bit_fec(page, stored)
+            if recovery is not None:
+                fixed_page, _desc = recovery
+                # Cache nothing — just return the corrected bytes so the
+                # caller observes a valid page.  We deliberately do not
+                # silently rewrite the on-disk file (the reader is
+                # read-only).
+                return fixed_page
+        raise TibxPageCrcError(page_idx, stored, computed)
+
+    def verify_page(self, page_idx: int) -> tuple[bool, int, int]:
+        """Return ``(ok, stored_crc, computed_crc)`` for one page.
+
+        Useful for bulk integrity scans where we want a tally rather
+        than an exception.  Does *not* attempt FEC.
+        """
+        page = self._raw_read_page(page_idx)
+        stored = read_stored_page_crc32(page)
+        computed = compute_page_crc32(page)
+        return computed == stored, stored, computed
 
     # ------------------------------------------------------------------ #
     # Segment iteration / decompression
@@ -389,4 +560,4 @@ class TibxReader:
         }
 
 
-__all__ = ["TibxReader"]
+__all__ = ["TibxReader", "TibxPageCrcError"]

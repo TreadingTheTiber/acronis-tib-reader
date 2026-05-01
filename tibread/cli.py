@@ -9,6 +9,7 @@ Subcommands:
   tib extract <tib> <path-in-vol> [-o] Extract a single file by NTFS path.
   tib ls <tib> [<path>]                List files in the .tib's filesystem.
   tib tibx-info <tibx>                 Show .tibx structure (experimental; archive3 page-store).
+  tib tibx-verify <tibx>               Validate every page's CRC-32C; report mismatches.
 
 Examples:
   tib info backup_full_b1_s1_v1.tib
@@ -194,6 +195,85 @@ def cmd_tibx_info(args):
     return 0
 
 
+def cmd_tibx_verify(args):
+    """Walk a ``.tibx`` file and validate every page's CRC-32C envelope.
+
+    By default a random sample of pages is verified for fast spot-check
+    (``--sample N``).  Pass ``--full`` to walk the entire file (slow on
+    multi-GiB archives without the ``crc32c`` C extension installed).
+    """
+    import random
+    import time
+
+    from .tibx import TibxReader
+    from .tibx.format import PAGE_TYPE_NAMES
+
+    with TibxReader(args.tibx) as r:
+        total_pages = r.page_count
+        if args.full:
+            indices = range(total_pages)
+            scope = f"all {total_pages:,} pages"
+        else:
+            n = min(args.sample, total_pages)
+            rng = random.Random(args.seed)
+            indices = sorted(rng.sample(range(total_pages), n))
+            scope = f"random sample of {n:,} of {total_pages:,} pages"
+
+        print(f"tibx file: {args.tibx}  ({r.file_size:,} bytes, "
+              f"{total_pages:,} pages)")
+        print(f"verifying {scope}...")
+
+        ok = 0
+        bad = 0
+        by_type: dict[int, int] = {}
+        bad_pages: list[tuple[int, int, int]] = []
+        t0 = time.monotonic()
+        report_every = max(1, len(indices) // 20) if hasattr(indices, '__len__') else 100_000
+
+        for i, page_idx in enumerate(indices):
+            try:
+                page_ok, stored, computed = r.verify_page(page_idx)
+            except IOError as e:
+                print(f"  page {page_idx}: read error: {e}", file=sys.stderr)
+                bad += 1
+                continue
+            ptype = r.read_raw_page(page_idx)[1]
+            by_type[ptype] = by_type.get(ptype, 0) + 1
+            if page_ok:
+                ok += 1
+            else:
+                bad += 1
+                if len(bad_pages) < 32:
+                    bad_pages.append((page_idx, stored, computed))
+            if args.verbose and (i + 1) % report_every == 0:
+                elapsed = time.monotonic() - t0
+                rate = (i + 1) / elapsed if elapsed else 0
+                print(f"  {i + 1:,}/{len(indices) if hasattr(indices, '__len__') else '?':,} "
+                      f"({rate:,.0f} pages/s)")
+
+        elapsed = time.monotonic() - t0
+        total = ok + bad
+        rate = total / elapsed if elapsed else 0
+        bytes_per_s = rate * 4096
+
+        print()
+        print(f"verified {total:,} pages in {elapsed:.2f}s")
+        print(f"  rate: {rate:,.0f} pages/s ({bytes_per_s / 1e6:,.1f} MB/s)")
+        print(f"  OK: {ok:,}")
+        print(f"  CRC mismatches: {bad:,}")
+        if by_type:
+            print(f"  by page type:")
+            for t in sorted(by_type):
+                name = PAGE_TYPE_NAMES.get(t, f"0x{t:02x}")
+                print(f"    {name} (0x{t:02x}): {by_type[t]:,}")
+        if bad_pages:
+            print(f"  first {len(bad_pages)} bad pages:")
+            for pidx, stored, computed in bad_pages:
+                print(f"    page {pidx:,}: stored=0x{stored:08x} "
+                      f"computed=0x{computed:08x}")
+        return 0 if bad == 0 else 1
+
+
 def cmd_mount(args):
     try:
         from .mount.fuse import fuse_mount
@@ -252,6 +332,33 @@ def main(argv=None):
              "use 0 for full file scan).",
     )
     ap.set_defaults(func=cmd_tibx_info)
+
+    ap = sub.add_parser(
+        "tibx-verify",
+        help="Validate every page's CRC-32C in a .tibx file [experimental].",
+    )
+    ap.add_argument("tibx")
+    ap.add_argument(
+        "--sample",
+        type=int,
+        default=1000,
+        help="Verify a random sample of N pages (default: 1000). "
+             "Ignored when --full is given.",
+    )
+    ap.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Seed for the sampling RNG (default: 0; deterministic).",
+    )
+    ap.add_argument(
+        "--full",
+        action="store_true",
+        help="Walk every page in the file (slow; ~51 GiB on the test "
+             "archive). Without the optional 'crc32c' C extension this "
+             "may take several minutes.",
+    )
+    ap.set_defaults(func=cmd_tibx_verify)
 
     ap = sub.add_parser("mount", help="Mount the .tib's NTFS volume read-only.")
     ap.add_argument("tib")
