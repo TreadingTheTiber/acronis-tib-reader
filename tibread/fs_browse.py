@@ -87,13 +87,104 @@ def _normalize_path(p: str) -> str:
     return p
 
 
+def _skip_zlib_chunk(f, start_off: int) -> Tuple[int, int]:
+    """Walk a zlib stream at ``start_off`` reading mostly headers.
+
+    Returns ``(comp_len, plain_len)`` — the byte span of the zlib stream
+    (after the 1-byte type tag) and its decompressed length.
+
+    Two paths:
+
+    * **Fast path** (used for `m` content chunks): if every deflate
+      block is stored (BTYPE=00), we read 5 bytes per block + skip
+      past the payload, never touching it. This is essential for
+      remote/SMB archives where every byte costs a round-trip.
+    * **Slow path** (used for `n` end-of-file markers, which use a
+      fixed-Huffman empty block, BTYPE=01): we fall back to
+      ``zlib.decompressobj`` on a small read window. These chunks
+      are 8 bytes total so the fallback is cheap.
+    """
+    f.seek(start_off)
+    hdr = f.read(2)
+    if len(hdr) < 2 or hdr[0] != 0x78:
+        raise ValueError(f"missing zlib magic at offset {start_off}")
+
+    # Peek at the first deflate block header to choose path.
+    f.seek(start_off + 2)
+    first_bh = f.read(1)
+    if not first_bh:
+        raise ValueError(f"truncated deflate at {start_off + 2}")
+    btype0 = (first_bh[0] >> 1) & 0x03
+
+    if btype0 == 0x00:
+        # Fast path: stored-block walk.
+        pos = start_off + 2
+        plain_len = 0
+        while True:
+            f.seek(pos)
+            bh = f.read(5)
+            if len(bh) < 5:
+                raise ValueError(f"truncated stored-block header at {pos}")
+            bfinal = bh[0] & 0x01
+            btype = (bh[0] >> 1) & 0x03
+            if btype != 0x00:
+                # Mid-stream switch to non-stored — rare; fall back.
+                return _slow_zlib_skip(f, start_off)
+            length = bh[1] | (bh[2] << 8)
+            nlength = bh[3] | (bh[4] << 8)
+            if (length ^ 0xFFFF) != nlength:
+                raise ValueError(
+                    f"stored-block LEN/NLEN mismatch at {pos:#x}: "
+                    f"LEN={length:#x} ~LEN={nlength:#x}"
+                )
+            plain_len += length
+            pos += 5 + length
+            if bfinal:
+                break
+        pos += 4   # adler32 trailer
+        return pos - start_off, plain_len
+
+    # Slow path: fixed/dynamic Huffman block (e.g. the 'n' end-of-file
+    # marker, which is a single fixed-Huffman empty block).
+    return _slow_zlib_skip(f, start_off)
+
+
+def _slow_zlib_skip(f, start_off: int, max_read: int = 65536) -> Tuple[int, int]:
+    """Inflate up to ``max_read`` bytes starting at ``start_off`` and
+    report the consumed length + decompressed length. Used for non-
+    stored deflate streams (fixed/dynamic Huffman)."""
+    f.seek(start_off)
+    buf = f.read(max_read)
+    d = zlib.decompressobj()
+    plain = d.decompress(buf)
+    if not d.eof:
+        # If we hit max_read without EOF, the chunk is bigger than
+        # we expected; widen the window and retry.
+        chunks = [plain]
+        while not d.eof:
+            more = f.read(64 * 1024)
+            if not more:
+                raise ValueError(f"unexpected EOF in zlib at {start_off}")
+            chunks.append(d.decompress(more))
+        plain = b"".join(chunks)
+    consumed = len(buf) - len(d.unused_data)
+    return consumed, len(plain)
+
+
+# Backwards-compat alias (old name was misleading once we added the
+# slow-path fallback).
+_skip_zlib_stored_chunk = _skip_zlib_chunk
+
+
 def build_index(tib_path: str, *, progress: bool = False) -> FsArchiveIndex:
     """Walk the `.tib` body once, recording per-file chunk offsets, then
     pair each file with a directory-tree record by file_size.
 
-    This costs one full sequential read of the archive (the same cost
-    as ``extract_files`` would pay), but produces a small summary
-    structure that subsequent operations can use for random access.
+    This costs one **header-only** read of the archive — we seek past
+    each chunk's compressed payload rather than decompressing it,
+    which is essential for SMB-hosted archives where every byte costs
+    a network round-trip. A 173 GB share archive indexes in minutes
+    rather than hours.
     """
     if not is_fs_mode_hybrid(tib_path):
         raise ValueError(
@@ -110,43 +201,104 @@ def build_index(tib_path: str, *, progress: bool = False) -> FsArchiveIndex:
     paired = 0
     unpaired = 0
 
-    # Then walk the m/n stream, building per-file chunk lists.
-    cur_offsets: List[int] = []
-    cur_comp_lens: List[int] = []
-    cur_size = 0
-    files: List[FsFileEntry] = []
-    last_progress = time.monotonic()
-    for rec in walk_fs_records(tib_path):
-        if rec.type_byte == TYPE_FILE_CHUNK:
-            cur_offsets.append(rec.offset)
-            cur_comp_lens.append(rec.comp_len)
-            cur_size += len(rec.plain) if rec.plain is not None else 0
-        elif rec.type_byte == TYPE_FILE_END:
-            if cur_offsets:
-                # Look up the path by file_size.
-                bucket = by_size.get(cur_size)
-                if bucket:
-                    dir_rec = bucket.pop(0)
-                    path = _normalize_path(dir_rec.fullpath)
-                    paired += 1
-                else:
-                    path = f"_unpaired_/recovered_{len(files)+1:06d}"
-                    unpaired += 1
-                files.append(FsFileEntry(
-                    path=path,
-                    size=cur_size,
-                    chunk_offsets=cur_offsets,
-                    chunk_comp_lens=cur_comp_lens,
-                ))
-                cur_offsets = []
-                cur_comp_lens = []
-                cur_size = 0
-                if progress and time.monotonic() - last_progress > 2.0:
-                    print(f"[tibread]   indexing... {len(files):,} files",
-                          flush=True)
-                    last_progress = time.monotonic()
-        # f-records and other unknown types: we don't need them for
-        # indexing (they don't affect chunk boundaries).
+    # Find the trailer to bound the walk.
+    file_size = os.path.getsize(tib_path)
+    with open(tib_path, "rb") as f:
+        f.seek(file_size - 48)
+        slice_size = struct.unpack_from("<Q", f.read(48), 8)[0]
+        concat_end = DATA_START + slice_size
+
+        # f-batch and trailer-region detection: stop the m/n walk when
+        # we hit the first non-m/non-n record, since beyond that lies
+        # the f-batches and the directory-tree blob (already decoded
+        # separately).
+        cur_offsets: List[int] = []
+        cur_comp_lens: List[int] = []
+        cur_size = 0
+        files: List[FsFileEntry] = []
+        last_progress = time.monotonic()
+
+        # When we hit a non-m/non-n byte, we're inside an f-batch (per-
+        # file metadata records) or another out-of-band region. We
+        # don't need its contents for indexing — just need to find the
+        # next m/n record. Scan forward looking for that boundary.
+        FBATCH_SKIP_LOOKAHEAD = 16 * 1024 * 1024   # plenty for any seen f-batch
+        # Recognize the directory-tree blob's leading byte 0x65 ('e');
+        # if we hit it, stop walking — beyond that lies the trailing
+        # region we already decoded separately.
+        DIRTREE_TYPE_BYTE = 0x65
+
+        cur = DATA_START
+        while cur < concat_end - 4:
+            f.seek(cur)
+            tag = f.read(1)
+            if not tag:
+                break
+            t = tag[0]
+            if t in (TYPE_FILE_CHUNK, TYPE_FILE_END):
+                try:
+                    comp_len, plain_len = _skip_zlib_chunk(f, cur + 1)
+                except ValueError:
+                    break
+                if t == TYPE_FILE_CHUNK:
+                    cur_offsets.append(cur)
+                    cur_comp_lens.append(comp_len)
+                    cur_size += plain_len
+                else:  # TYPE_FILE_END
+                    if cur_offsets:
+                        bucket = by_size.get(cur_size)
+                        if bucket:
+                            dir_rec = bucket.pop(0)
+                            path = _normalize_path(dir_rec.fullpath)
+                            paired += 1
+                        else:
+                            path = f"_unpaired_/recovered_{len(files)+1:06d}"
+                            unpaired += 1
+                        files.append(FsFileEntry(
+                            path=path,
+                            size=cur_size,
+                            chunk_offsets=cur_offsets,
+                            chunk_comp_lens=cur_comp_lens,
+                        ))
+                        cur_offsets = []
+                        cur_comp_lens = []
+                        cur_size = 0
+                        if progress and time.monotonic() - last_progress > 2.0:
+                            pct = 100.0 * cur / concat_end
+                            print(f"[tibread]   indexing {pct:5.1f}%  "
+                                  f"{len(files):,} files",
+                                  flush=True)
+                            last_progress = time.monotonic()
+                cur += 1 + comp_len
+            elif t == DIRTREE_TYPE_BYTE:
+                # We've reached the trailing region — stop.
+                break
+            else:
+                # Inside an f-batch or unknown record. Scan forward in
+                # 64 KB windows for the next [m|n][78 01] pattern.
+                next_off = -1
+                window_start = cur + 1
+                while window_start < min(concat_end - 4,
+                                         cur + FBATCH_SKIP_LOOKAHEAD):
+                    f.seek(window_start)
+                    chunk = f.read(min(65536,
+                                       concat_end - 4 - window_start))
+                    if not chunk:
+                        break
+                    for i in range(len(chunk) - 2):
+                        b = chunk[i]
+                        if (b in (TYPE_FILE_CHUNK, TYPE_FILE_END)
+                                and chunk[i + 1] == 0x78
+                                and chunk[i + 2] == 0x01):
+                            next_off = window_start + i
+                            break
+                    if next_off >= 0:
+                        break
+                    # Keep a 2-byte overlap in case the pattern straddles.
+                    window_start += max(1, len(chunk) - 2)
+                if next_off < 0:
+                    break
+                cur = next_off
 
     if progress:
         print(f"[tibread] index built: {len(files):,} files "
