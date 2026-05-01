@@ -95,7 +95,7 @@ the loader's consumers; some remain unidentified.
 | 6   | `slices`                | all     | LSM superblock; **key=20, value=0**                              | `arch+0x10f8`                   |
 | 7   | `umap` (used map)       | all     | LSM superblock; **key=20, value=0** (empty in tested archives)   | `arch+0x12a8`                   |
 | 8   | `notary` (Merkle tree)  | v7+     | Notary tree-config record + tree-root chain                      | `arch+0x12b0`, `+0x550`..`+0x578` |
-| 9   | `meta_keys`             | all     | NUL-separated list of UTF-8 key names (max 20)                   | `arch+0x1da8` array             |
+| 9   | `meta_keys`             | all     | Positional array of NUL-terminated UTF-8 *values* (max 20 slots; keys are baked into `ar_meta_keys`). Holds `type`, `disk_guid`, `hostname`, `agent_build`, `install_guid` etc. | `arch+0x1da8` array |
 | 10  | (unidentified)          | v8+     | unused by openers seen so far                                    | —                               |
 | 11  | `dedup_config`          | v8+     | 0 or 12 bytes: three BE u32s (chunking algorithm parameters)     | `arch+0x1ef0..+0x1ef8`         |
 | 12  | `golomb_subtable`       | v8+     | Per-level Golomb-coded segment-id index (0x1e+12*N bytes/level)  | `arch+0x10e8` aux at `+0x520` |
@@ -146,6 +146,66 @@ header_version=8).
   (`dedup_map` per loader name, but empty in test archive), 10, 14,
   15, 16. These slots are touched by the TLV parser but no consumer
   references them in the three callers examined.
+
+### Empirical TLV[9] decode (`Jmicron 0102.tibx`, 130 bytes)
+
+The TLV[9] payload is a positional array of NUL-terminated UTF-8
+strings — slot index `i` corresponds to the i-th key in the in-binary
+`ar_meta_keys` table. Empty slots (back-to-back NUL bytes) mean "this
+key is not populated for this archive". The loader bounds the walk at
+20 slots (`memchr` loop, `arch+0x1da8`).
+
+**These are *archive-level* metadata strings, NOT LSM tree names.**
+The strings-agent hypothesis ("meta_keys = key names for the LSM TLV
+slots 0..8") is therefore **refuted** by the on-disk content — TLV[9]
+holds values like `"disk"`, hostname, agent build version, and GUIDs;
+none of the strings name an LSM tree.
+
+Decoded slots from `Jmicron 0102.tibx`:
+
+| Slot | Inferred key name | Value (anonymized in places) |
+|------|------------------|------------------------------|
+| 0    | `type`           | `"disk"` (whole-disk image)  |
+| 1    | (unknown)        | (empty)                      |
+| 2    | (unknown)        | (empty)                      |
+| 3    | `disk_guid`      | source-disk UUID (36 chars)  |
+| 4    | `hostname`       | `"STRIDER-WIN63"` (sample)   |
+| 5    | `agent_build`    | `"ACPHO 27.3.1.40173 Win"`   |
+| 6..9 | (unknown)        | (empty)                      |
+| 10   | `install_guid`   | Acronis install UUID         |
+| 11..19 | (unknown)      | (empty)                      |
+
+Other (non-empty) slots from a different archive sample would let us
+fill in the remaining `ar_meta_keys` names. Two empty slots cluster
+between `type` and `disk_guid` (1, 2) and four cluster between
+`agent_build` and `install_guid` (6, 7, 8, 9), which is suggestive
+of grouped fields (e.g. display_name / OS / arch / locale variants
+typically advertised by Acronis MMS metadata).
+
+### Empirical TLV[18] decode (`Jmicron 0102.tibx`, 12 bytes)
+
+The single record on a whole-disk image is `(idx=0, byte_offset=0)`.
+The MBR for the same disk advertises two NTFS partitions (type 0x07)
+at byte offsets 1,048,576 and 368,050,176. The volume_table
+records do **not** match the MBR partition offsets, refuting the
+"per-MBR-partition byte-offset table" hypothesis for whole-disk images.
+
+The most consistent interpretation is:
+
+- **Whole-disk images** carry a single `(0, 0)` record — one
+  archive-level "volume" covering the entire source disk's LBA space
+  starting at byte 0.
+- **Per-volume images** (one or more individual partitions backed up
+  separately) would carry one record per partition with the
+  source-disk byte offset of each. No empirical sample of this case
+  has been confirmed yet; it remains an inference from the loader's
+  use of an rb-tree keyed on `byte_offset` at `arch+0x3f8`.
+
+Sample contents:
+
+| idx | byte_offset | meaning (whole-disk archive)            |
+|-----|-------------|-----------------------------------------|
+| 0   | 0           | whole disk (180 GB, MBR+2 NTFS partitions) |
 
 ### Notes on indices 8 and 9
 
