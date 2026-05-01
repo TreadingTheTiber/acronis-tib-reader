@@ -114,6 +114,9 @@ The `.tibx` reader is read-only and currently exposes six inspection
 commands. Full mount lands once the in-flight `disk_adapter` integration
 is merged; today `tibx-mount` exercises the bootstrap path only.
 
+For an end-to-end walkthrough (with verified command output and the
+programmatic API), see [`docs/TIBX_USER_GUIDE.md`](docs/TIBX_USER_GUIDE.md).
+
 ```bash
 tib tibx-info    backup.tibx              # ARCH header (hostname, GUID, agent build) + segment scan
 tib tibx-stat    backup.tibx              # LSM-tree superblocks + ctree summary
