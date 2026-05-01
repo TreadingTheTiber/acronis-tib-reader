@@ -110,6 +110,50 @@ def cmd_extract(args):
     return 0
 
 
+def cmd_browse_fs(args):
+    """Index an FS-mode hybrid .tib and serve a local HTTP file browser.
+
+    The user can navigate folders and click individual files to preview
+    or download — without extracting the entire archive to disk. The
+    first run builds an index (one full sequential read of the archive);
+    subsequent runs load it from the ``.fs.idx`` sidecar.
+    """
+    from .chunkmap_fs import is_fs_mode_hybrid
+    from .fs_browse import serve
+    if not is_fs_mode_hybrid(args.tib):
+        print(f"error: {args.tib} is not an FS-mode hybrid .tib. "
+              f"Use `tib mount` for sector-mode .tib / .tibx files.",
+              file=sys.stderr)
+        return 2
+    serve(
+        args.tib,
+        host=args.host,
+        port=args.port,
+        open_browser=not args.no_browser,
+        use_cache=not args.no_cache,
+        progress=True,
+    )
+    return 0
+
+
+def cmd_index_fs(args):
+    """Build (or refresh) the .fs.idx sidecar for an FS-mode hybrid .tib.
+
+    Useful for pre-computing the index on a fast machine before browsing
+    on a slow one (e.g. build over USB-3, browse over Wi-Fi).
+    """
+    from .chunkmap_fs import is_fs_mode_hybrid
+    from .fs_browse import build_index, save_index
+    if not is_fs_mode_hybrid(args.tib):
+        print(f"error: {args.tib} is not an FS-mode hybrid .tib.",
+              file=sys.stderr)
+        return 2
+    idx = build_index(args.tib, progress=True)
+    out = save_index(idx, path=args.out)
+    print(f"index saved to {out} ({len(idx.files):,} files)")
+    return 0
+
+
 def cmd_extract_fs(args):
     """Recover file content from an FS-mode hybrid .tib (share/NAS backup).
 
@@ -870,6 +914,35 @@ def main(argv=None):
     )
     ap.add_argument("tibx")
     ap.set_defaults(func=cmd_tibx_chain)
+
+    ap = sub.add_parser(
+        "browse-fs",
+        help="Browse an FS-mode hybrid .tib in a local web browser. "
+             "First run indexes the archive; subsequent runs are instant. "
+             "Recommended for non-technical users — no extraction or "
+             "filesystem mount required.",
+    )
+    ap.add_argument("tib", help="Path to an FS-mode hybrid .tib.")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="Bind address (default: 127.0.0.1, localhost only).")
+    ap.add_argument("--port", type=int, default=0,
+                    help="TCP port (default: 0 = pick a free port).")
+    ap.add_argument("--no-browser", action="store_true",
+                    help="Don't auto-open a browser tab.")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="Always rebuild the index instead of using the "
+                         ".fs.idx sidecar.")
+    ap.set_defaults(func=cmd_browse_fs)
+
+    ap = sub.add_parser(
+        "index-fs",
+        help="Build an .fs.idx sidecar for an FS-mode hybrid .tib "
+             "(useful before browsing on a slow connection).",
+    )
+    ap.add_argument("tib")
+    ap.add_argument("--out", default=None,
+                    help="Output path (default: <tib>.fs.idx).")
+    ap.set_defaults(func=cmd_index_fs)
 
     ap = sub.add_parser(
         "extract-fs",
