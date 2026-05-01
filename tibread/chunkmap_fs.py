@@ -184,15 +184,27 @@ def _decode_metadata_blob(blob: bytes) -> Optional[FsFileMetadata]:
     extent_table_end = 0x40 + 32 * num_extents
     if extent_table_end + MIN_TRAILER > len(blob):
         return None
-    md5 = bytes(blob[0x28:0x38])
+    # The 16-byte MD5-of-first-256-KiB-chunk lives at +0x24 (NOT +0x28
+    # as earlier RE rounds claimed). Verified empirically against
+    # recovered file content: blob[0x24:0x34] == MD5(content[:262144])
+    # with 67/68 paired files matching (single failure is a separate
+    # pairing-drift issue).
+    md5 = bytes(blob[0x24:0x34])
 
     extents = []
     eo = 0x40
     for _ in range(num_extents):
-        ext_md5 = bytes(blob[eo:eo + 16])
+        # Per Agent 2 (2026-05-01): per-extent layout is
+        #   +0x00  u32 zero
+        #   +0x04  u8[12] truncated md5 of the NEXT 256-KiB chunk
+        #          (= MD5(content[256K*(k+1) : 256K*(k+2)])[:12])
+        #   +0x10  u32 attr_id
+        #   +0x14  u32 reserved
+        #   +0x18  u64 logical_offset
+        ext_md5_trunc = bytes(blob[eo + 4:eo + 16])
         attr_id = struct.unpack_from("<I", blob, eo + 16)[0]
         log_off = struct.unpack_from("<Q", blob, eo + 24)[0]
-        extents.append(FsExtent(md5=ext_md5, attr_id=attr_id,
+        extents.append(FsExtent(md5=ext_md5_trunc, attr_id=attr_id,
                                 logical_offset=log_off))
         eo += 32
 
@@ -628,11 +640,14 @@ def extract_files(tib_path: str, output_dir: str, *,
         with open(out_path, "wb") as out:
             out.write(content)
         total_bytes += len(content)
+        # The metadata blob's md5_content field is MD5(content[:262144]),
+        # not MD5(whole content). Match what's in the metadata so md5_ok
+        # is meaningful.
         emitted.append(_EmittedFile(
             index=file_count,
             path=os.path.relpath(out_path, output_dir),
             size=len(content),
-            md5=hashlib.md5(content).digest(),
+            md5=hashlib.md5(content[:262144]).digest(),
             original_path=orig_path,
             dir_rec=dir_rec,
         ))
