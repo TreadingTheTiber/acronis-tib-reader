@@ -99,6 +99,16 @@ class UnsupportedTibFormat(ValueError):
     pass
 
 
+class LegacyTibFormat(UnsupportedTibFormat):
+    """Raised by the modern chunk-map locator when the file is a valid
+    sector-mode .tib but pre-dates the modern chunk-map locator (TI 2014/
+    2015/2016 era). `detect_format_era` catches this specifically to
+    classify the file as 'legacy' — it must NOT be conflated with the
+    other UnsupportedTibFormat causes (multi-volume, FS-mode trailer,
+    very-legacy 4K sector, .tibx) which represent genuine read failures."""
+    pass
+
+
 def find_last_volume(path: str) -> str:
     """For multi-volume .tib backups (`*_v1.tib`, `*_v2.tib`, …), find the
     file with the highest sequence number. Returns the path unchanged
@@ -311,10 +321,12 @@ def detect_format_era(tib_path: str) -> str:
     try:
         _modern_chunkmap_offset(tib_path)
         return "modern"
-    except UnsupportedTibFormat:
-        # _modern_chunkmap_offset raises UnsupportedTibFormat with a
-        # "no on-disk chunk-map locator was found" message when the blob
-        # has no 13-byte locator signature.
+    except LegacyTibFormat:
+        # The locator-not-found case — a real legacy .tib that lacks the
+        # 13-byte chunk-map locator signature. Other UnsupportedTibFormat
+        # causes (multi-volume non-last, FS-mode trailer, very-legacy 4K,
+        # .tibx) propagate so the caller sees the precise reason instead
+        # of a misleading "legacy" classification.
         return "legacy"
 
 
@@ -374,15 +386,14 @@ def _modern_chunkmap_offset(tib_path: str) -> Tuple[int, int]:
                     candidates.append((scan_start + i, V, S))
 
         if not candidates:
-            raise UnsupportedTibFormat(
+            raise LegacyTibFormat(
                 "this .tib has a valid sector-mode header but no on-disk "
                 "chunk-map locator was found in its metadata blob. "
                 "This usually means the file is a pre-2018 Acronis True "
                 "Image generation (TI 2014/2015/2016) that predates the "
-                "ExtraFileChunkMap feature. tibread can't random-access "
-                "such files yet — supporting them would require a full "
-                "sequential scan of the block stream to build an index "
-                "(slow, ~3 hours per TB). PRs welcome."
+                "ExtraFileChunkMap feature. The legacy walker handles "
+                "these via inline SequentialChunkMap records — call "
+                "`detect_format_era` to dispatch."
             )
         if len(candidates) > 1:
             # In practice the signature is unique on the test files we've
