@@ -5,6 +5,92 @@ All notable changes to `tibread` will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — 0.2.0-dev (in progress)
+
+This series brings up the `.tibx` (QARCH archive3, TI 2020+) reader from a
+"detect-and-reject" stub to a substantially-decoded experimental reader.
+None of the new code reaches the legacy `.tib` paths; the 0.1.0 features
+are unchanged.
+
+### Added — `.tibx` (experimental)
+
+- **Page format + integrity** (`tibread.tibx.format`)
+  - 4 KiB pages with a fixed page header (page index, type, generation).
+  - Per-page CRC-32C validation with single-bit forward-error-correction
+    (FEC) on the page body — matches the on-disk integrity scheme
+    Acronis ships in TI 2020+.
+- **ARCH header + canonical TLV directory** (`tibread.tibx.format`)
+  - 19-entry TLV directory in the `QARCH` ARCH header decoded end-to-end
+    (hostname, disk GUID, agent build, archive UUID, install GUID, etc.).
+  - The mapping was settled empirically across three rounds of conflicting
+    per-investigation docs and is now canonical in
+    `docs/legacy/ARCHIVE3_TLV_DIRECTORY.md` (consolidated in commit
+    `acb1ab2`); the previous per-tag investigation notes are superseded.
+  - TLV[9] `meta_keys` and TLV[18] `volume_table` decoded; the latter
+    cross-references against the on-disk MBR to identify whole-disk
+    vs. per-partition images.
+- **LSM-tree walker** (`tibread.tibx.lsm`, `tibread.tibx.lsm_cells`)
+  - All nine LSM superblocks (L-SB) parsed by name: `lsm`, `data_map`,
+    `segment_map`, `dedup_map`, `nlink_map`, `slices`, `umap`, `keymap`,
+    `notary`.
+  - Top-down ctree walk across LDIR (interior) and LEAF pages with the
+    cell decoder, including memtree-only trees.
+- **Segment decompression** (`tibread.tibx.segment`)
+  - Zstd-compressed plaintext (`key=0`) segments decoded end-to-end,
+    spanning multiple pages where required.
+- **Chain mechanics** — decoded; documented in `docs/legacy/ARCHIVE3_CHAINS.md`.
+  Chain walker is in flight in a separate agent.
+- **Encryption format** — decoded as a skeleton at
+  `tibread/tibx/encryption.py`; see `docs/legacy/ARCHIVE3_ENCRYPTION.md`.
+  No sample yet, so end-to-end decryption is not wired up.
+- **Page type 0x05 identified** as a Golomb-Rice dedup filter
+  (`docs/legacy/ARCHIVE3_PAGE_05.md`); all six `.tibx` page types
+  (`0x00`-`0x05` + the `0xff` DATA marker) now have names and decoders
+  or stubs.
+- **Disk-adapter scaffolding** (`tibread.tibx.disk_image`,
+  `tibread.tibx.disk_adapter`)
+  - Bootstrap `read_lba_range()` for arbitrary-LBA reads against
+    `segment_map` lookups; full integration into `NtfsVolume` is in
+    flight in a separate agent.
+- **CLI** (experimental, all under `tib tibx-*`)
+  - `tib tibx-info` — ARCH header summary + segment scan
+  - `tib tibx-stat` — LSM-tree status (per-tree ctree summary)
+  - `tib tibx-verify` — CRC-32C validation across a sampled or full
+    page range
+  - `tib tibx-volumes` — TLV[18] volume_table + TLV[9] meta_keys,
+    cross-referenced against the MBR
+  - `tib tibx-mount` — bootstraps `NtfsVolume` against a `.tibx` (lands
+    once disk-adapter integration is merged)
+- **Test coverage** — 31 new unit tests across `test_tibx.py`,
+  `test_tibx_adapter.py`, `test_tibx_disk_image.py`. Full suite at 43
+  tests passing.
+
+### Documentation
+
+- New `docs/FORMAT_TIBX.md` master index that links every `.tibx`
+  RE-note (`ARCHIVE3_*.md`) plus the early `RESEARCH_TIBX_*.md` recon
+  files.
+- The `.tibx`-specific RE was driven by a multi-agent empirical
+  correction loop: parallel agents proposed TLV-directory mappings,
+  page-type interpretations and LSM superblock layouts; conflicts were
+  resolved by re-running against the reference file and consolidating
+  into a single canonical document. The TLV-directory consolidation
+  (commit `acb1ab2`) is the most visible example.
+
+### Changed
+
+- `.tibx` is no longer rejected at `open_tib()` — clean error remains
+  for callers that pass `.tibx` to the legacy path, but `TibxReader`
+  + `tib tibx-*` commands are the supported entry points.
+
+### Still unimplemented
+
+- `.tibx` FUSE mount (waiting on `disk_adapter` integration agent)
+- `.tibx` chain reconstruction (waiting on chain walker agent)
+- `.tibx` encrypted (`key != 0`) archives
+- `.tibx` write / verify-write paths (out of scope; this reader is
+  read-only)
+
 ## [0.1.0] — 2026-04-30
 
 First public release. Reverse-engineered end-to-end from `product.bin` (Acronis

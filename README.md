@@ -108,6 +108,25 @@ robocopy "\\?\X:\path\to\mount" "\\?\D:\restored" /E /R:0 /W:0 /XJ /MT:8 /COPY:D
 
 (`/XJ` skips reparse points like `TheVolumeSettingsFolder`. Use `\\?\` for paths >260 chars.)
 
+### Inspect a `.tibx` archive (TI 2020+, experimental)
+
+The `.tibx` reader is read-only and currently exposes four inspection
+commands. Mount lands once the in-flight `disk_adapter` integration is
+merged.
+
+```bash
+tib tibx-info    backup.tibx              # ARCH header (hostname, GUID, agent build) + segment scan
+tib tibx-stat    backup.tibx              # LSM-tree superblocks + ctree summary
+tib tibx-verify  backup.tibx --sample 100 # Sample N pages and validate CRC-32C
+tib tibx-volumes backup.tibx              # TLV[18] volume_table cross-referenced against the MBR
+```
+
+Chain support (`.tibx` increments / differentials) and encrypted
+(`key != 0`, AES-wrapped) archives are decoded in spec only — the chain
+walker is in flight and the encryption skeleton is at
+`tibread/tibx/encryption.py`. See `docs/FORMAT_TIBX.md` for the full
+RE index.
+
 ### Programmatic API
 
 ```python
@@ -130,7 +149,7 @@ data = vol.read_file("Users/alice/Documents/x.docx")
 | Sector-mode `.tib`, modern (TI 2018+, 16-byte preamble + 128-cluster blocks) | ✅ Supported | The common full-disk backup format from Acronis True Image 2018-2019. See `docs/FORMAT.md`. |
 | Sector-mode `.tib`, legacy (TI 2014/2015/2016, 8-byte preamble + 64-cluster blocks) | ✅ Supported | Recognised by absence of TLV tag `0x9b` in the metadata blob; chunk map is split across inline `SequentialChunkMap` records interleaved with the block stream. **First open is slow** (sequential scan to find the inline chunk maps — ~4 minutes for 8 GB; subsequent opens are instant via the cached `.idx` sidecar). See `docs/FORMAT_LEGACY.md`. |
 | Sector-mode `.tib`, very-legacy (TI 2010-2013, `version=1` + `sector_size=0x1000`) | ❌ Rejected with a clean error | Acronis True Image 2018+ reads these only by destructively migrating them in-place to the modern format. To read with `tibread`: open once in TI 2018+ to migrate, then re-run. See `docs/FORMAT_VERY_LEGACY.md`. |
-| `.tibx` (TIB eXtended, "QARCH" archive3 page-store) | ⚠️ Experimental | Acronis True Image 2020+ uses a 4 KiB-page LSM-tree store with Zstd-compressed segments (not SQLite, despite earlier folklore). `tibread.TibxReader` / `tib tibx-info` can open the archive, decode the human-readable header (hostname, disk GUID, agent build, archive UUID), and decompress plaintext (`key=0`) Zstd segments end-to-end. **What does not work yet:** LSM index walking, logical chunk lookup, FUSE mount, encrypted (`key!=0`) archives. Tested on one specific file; AES-wrapped variants are unimplemented. See `tibread/tibx/` and `docs/legacy/RESEARCH_TIBX_STRUCTURE.md`. |
+| `.tibx` (TIB eXtended, "QARCH" archive3 page-store) | ⚠️ Experimental — `info` / `stat` / `verify` / `volumes` work; `mount` works once disk_adapter integration lands | Acronis True Image 2020+ uses a 4 KiB-page LSM-tree store with Zstd-compressed segments (not SQLite, despite earlier folklore). `tibread.TibxReader` decodes: page header + CRC-32C + single-bit FEC; the 19-entry ARCH-header TLV directory (canonical mapping in `docs/legacy/ARCHIVE3_TLV_DIRECTORY.md`); all 9 LSM superblocks; ctree walks across LDIR / LEAF pages with the cell decoder; segment decompression (Zstd `key=0`); all six page types named (incl. `0x05` Golomb-Rice dedup filter). The encryption format (`key!=0` AES-wrapped segments) is spec'd as a skeleton in `tibread/tibx/encryption.py`. Working CLI commands: `tib tibx-info`, `tib tibx-stat`, `tib tibx-verify`, `tib tibx-volumes`. Chain reconstruction (`.tibx` increments) and FUSE mount via the disk-adapter shim are in active integration. Tested on one specific file. See `tibread/tibx/` and `docs/FORMAT_TIBX.md`. |
 | Filesystem-mode v1 `.tib` (magic `0x8F5C36C6`) | ⚠️ Format spec'd, not yet implemented | See `docs/FORMAT.md` |
 | Filesystem-mode v2 `.tib` (magic `0x44686EB4`) | ⚠️ Format spec'd, not yet implemented | See `docs/FORMAT.md` |
 | Tape archive `.tib` (footer magic `0x179631B4`) | ❌ Out of scope | Rare in 2026 |
@@ -171,6 +190,14 @@ For full RE history see `docs/RE_HISTORY.md`. For format specs see
 `docs/FORMAT.md` (modern), `docs/FORMAT_LEGACY.md` (legacy), and
 `docs/FORMAT_VERY_LEGACY.md` (TI 2010-2013, rejected).
 
+`.tibx` (TI 2020+) is a wholly different container: a 4 KiB-page LSM-tree
+store with a `QARCH` ARCH header carrying a 19-entry TLV directory, nine
+named LSM trees (`data_map`, `segment_map`, `dedup_map`, …) walked via
+ctree LDIR/LEAF pages, and Zstd-compressed segments addressed by the
+segment_map. Pages carry CRC-32C with single-bit FEC. The full TLV
+directory mapping is canonical in `docs/legacy/ARCHIVE3_TLV_DIRECTORY.md`;
+see `docs/FORMAT_TIBX.md` for the master index of all `.tibx` RE notes.
+
 ## Project layout
 
 ```
@@ -186,11 +213,22 @@ tibread/                    Python package (importable + CLI)
 ├── verify.py               Volume-header Adler32 validator + format-magic dispatch
 ├── metadata.py             Metadata-blob TLV parser
 ├── mount/fuse.py           FUSE mount (Linux)
+├── tibx/                   Experimental `.tibx` (QARCH archive3) reader
+│   ├── reader.py           TibxReader: page reader + ARCH header decode
+│   ├── format.py           Page header / CRC-32C / FEC / TLV directory
+│   ├── lsm.py              L-SB superblock parser + ctree walker
+│   ├── lsm_cells.py        Cell decoder for LDIR / LEAF pages
+│   ├── segment.py          Zstd-compressed segment reader
+│   ├── disk_image.py       Bootstrap read_lba_range() (early plumbing)
+│   ├── disk_adapter.py     Bridge to NtfsVolume (in flight)
+│   └── encryption.py       AES-wrapped segment skeleton (in flight)
 └── cli.py                  `tib` command entry point
 
 tools/                      Standalone scripts (helper / advanced use)
 docs/                       Format specs and RE notes
-└── legacy/                 Per-investigation RE notes for the legacy format
+├── FORMAT.md / FORMAT_LEGACY.md / FORMAT_VERY_LEGACY.md   `.tib` specs
+├── FORMAT_TIBX.md          `.tibx` master RE-notes index
+└── legacy/                 Per-investigation RE notes (`.tib` + `.tibx`)
 ```
 
 ## Tested on
