@@ -494,6 +494,39 @@ class TibxReader:
         return out
 
     # ------------------------------------------------------------------ #
+    # Source-disk LBA reads (bootstrap-only until LSM walker lands)
+    # ------------------------------------------------------------------ #
+
+    def read_lba_range(
+        self,
+        start_lba: int,
+        length: int,
+        *,
+        sector_size: int = 512,
+    ) -> bytes:
+        """Read ``length`` bytes from the source disk image.
+
+        Currently supports only the bootstrap range
+        ``[0, 262144)`` (the first SG segment, which is empirically the
+        MBR plus the first 256 KiB of source-disk content).  Reads
+        outside that range require the ``segment_map`` LSM-tree walker
+        and raise
+        :class:`tibread.tibx.disk_image.ChunkMapNotImplemented`.
+
+        See :mod:`tibread.tibx.disk_image` for full notes on the
+        chunk-map design and what needs to land before this becomes a
+        general random-access primitive.
+        """
+        # Local import keeps :mod:`disk_image` optional and avoids a
+        # circular import (``disk_image`` imports ``TibxReader`` only
+        # for type-checking).
+        from .disk_image import read_lba_range as _read_lba_range
+
+        return _read_lba_range(
+            self, start_lba, length, sector_size=sector_size
+        )
+
+    # ------------------------------------------------------------------ #
     # File map summary
     # ------------------------------------------------------------------ #
 

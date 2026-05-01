@@ -32,6 +32,21 @@ from .format import (
 )
 from .reader import TibxReader, TibxPageCrcError
 from .segment import SgSegment, decompress_segment, parse_sg_header
+from .disk_image import (
+    BOOTSTRAP_LEN,
+    ChunkMapNotImplemented,
+    read_lba_range,
+)
+from .lsm import (
+    CTreeRef,
+    LsmPageHeader,
+    LsmSuperblock,
+    parse_leaf,
+    parse_leaf_header,
+    read_lsm_superblocks,
+    walk_lsm_region,
+    walk_lsm_tree,
+)
 
 __all__ = [
     "TibxReader",
@@ -39,6 +54,9 @@ __all__ = [
     "SgSegment",
     "decompress_segment",
     "parse_sg_header",
+    "BOOTSTRAP_LEN",
+    "ChunkMapNotImplemented",
+    "read_lba_range",
     "compute_page_crc32",
     "crc32c",
     "PAGE_SIZE",
@@ -50,4 +68,13 @@ __all__ = [
     "PAGE_TYPE_LDIR",
     "PAGE_TYPE_LSM5",
     "PAGE_TYPE_DATA",
+    # LSM tree parser (lsm.py)
+    "CTreeRef",
+    "LsmPageHeader",
+    "LsmSuperblock",
+    "parse_leaf",
+    "parse_leaf_header",
+    "read_lsm_superblocks",
+    "walk_lsm_region",
+    "walk_lsm_tree",
 ]
