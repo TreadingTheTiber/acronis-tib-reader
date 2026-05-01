@@ -8,6 +8,7 @@ Subcommands:
   tib mount <tib> <mountpoint> [opts]  Mount the .tib's NTFS volume read-only via FUSE (Linux).
   tib extract <tib> <path-in-vol> [-o] Extract a single file by NTFS path.
   tib ls <tib> [<path>]                List files in the .tib's filesystem.
+  tib tibx-info <tibx>                 Show .tibx structure (experimental; archive3 page-store).
 
 Examples:
   tib info backup_full_b1_s1_v1.tib
@@ -103,6 +104,96 @@ def cmd_extract(args):
     return 0
 
 
+def cmd_tibx_info(args):
+    """Print a structural summary of an Acronis archive3 (.tibx) file."""
+    from .tibx import TibxReader
+
+    with TibxReader(args.tibx) as r:
+        print(f"tibx file: {args.tibx}  ({r.file_size:,} bytes)")
+        print(f"  pages: {r.page_count:,} of 4096 bytes")
+        print()
+        hdr = r.read_arch_header()
+        print("ARCH header:")
+        for key in (
+            "header_magic",
+            "version",
+            "archive_uuid",
+            "created_unix_ms",
+            "modified_unix_ms",
+            "hostname",
+            "disk_guid",
+            "install_guid",
+            "agent_build",
+        ):
+            if key in hdr:
+                print(f"  {key:18s}: {hdr[key]}")
+        if hdr.get("strings"):
+            print(f"  strings (page 1) : {hdr['strings']}")
+        print()
+
+        summary = r.file_map_summary()
+        print("File map:")
+        print(f"  head page types: " + ", ".join(
+            f"#{idx}=0x{t:02x}" for idx, t in summary["head_page_types"]
+        ))
+        print(f"  tail page types: " + ", ".join(
+            f"#{idx}=0x{t:02x}" for idx, t in summary["tail_page_types"]
+        ))
+        if summary["leaf_run_pages"]:
+            print(
+                f"  LEAF region: pages "
+                f"{summary['leaf_run_start']:,}..{summary['leaf_run_end']:,} "
+                f"(span {summary['leaf_run_pages']:,} pages, "
+                f"{summary.get('leaf_page_count', summary['leaf_run_pages']):,} of them LEAF)"
+            )
+        else:
+            print("  LEAF run: not found in tail sample")
+        print()
+
+        # Walk the first N segments to give a flavour without iterating
+        # the whole 50 GB file.  --max-segments 0 enumerates every segment.
+        max_segments = args.max_segments if args.max_segments and args.max_segments > 0 else None
+        n = 0
+        comp_hist: dict[int, int] = {}
+        total_zlen = 0
+        total_len = 0
+        first5: list = []
+        for seg in r.find_segments():
+            comp_hist[seg.comp] = comp_hist.get(seg.comp, 0) + 1
+            total_zlen += seg.zlen
+            total_len += seg.length
+            if n < 5:
+                first5.append(seg)
+            n += 1
+            if max_segments is not None and n >= max_segments:
+                break
+
+        scope = (
+            f"first {max_segments:,} segments"
+            if max_segments is not None
+            else f"all {n:,} segments"
+        )
+        print(f"Segment scan ({scope}):")
+        print(f"  segments seen: {n:,}")
+        print(f"  total compressed: {total_zlen:,} bytes")
+        print(f"  total uncompressed (claimed): {total_len:,} bytes")
+        if total_zlen:
+            ratio = total_len / total_zlen
+            print(f"  ratio: {ratio:.2f}x")
+        print(f"  comp variant histogram: " + ", ".join(
+            f"0x{c:04x}={n}" for c, n in sorted(comp_hist.items())
+        ))
+        print()
+        print("First 5 segments:")
+        for i, seg in enumerate(first5):
+            print(
+                f"  #{i}: page={seg.page_idx:,}  len={seg.length:,}  "
+                f"zlen={seg.zlen:,}  key={seg.key}  "
+                f"comp=0x{seg.comp:04x}  span={seg.page_span()} pages"
+            )
+    return 0
+
+
 def cmd_mount(args):
     try:
         from .mount.fuse import fuse_mount
@@ -147,6 +238,20 @@ def main(argv=None):
     ap.add_argument("path", help="Path within the .tib's filesystem.")
     ap.add_argument("-o", "--out", help="Output path (default: basename of source).")
     ap.set_defaults(func=cmd_extract)
+
+    ap = sub.add_parser(
+        "tibx-info",
+        help="Show .tibx (archive3) structure summary [experimental].",
+    )
+    ap.add_argument("tibx")
+    ap.add_argument(
+        "--max-segments",
+        type=int,
+        default=200,
+        help="Cap segment-scan at this many segments (default: 200; "
+             "use 0 for full file scan).",
+    )
+    ap.set_defaults(func=cmd_tibx_info)
 
     ap = sub.add_parser("mount", help="Mount the .tib's NTFS volume read-only.")
     ap.add_argument("tib")
