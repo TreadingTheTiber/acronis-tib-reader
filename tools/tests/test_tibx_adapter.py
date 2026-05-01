@@ -106,15 +106,23 @@ class TibxDiskAdapterTests(unittest.TestCase):
             self.assertGreater(p["byte_size"], 0)
 
     def test_partition_offset_view_translates(self) -> None:
-        """Adapter with ``partition_offset`` adds it to every read."""
-        # Pick a small, in-bootstrap offset (e.g. 1024) so we can verify
-        # the slicing works without needing the LSM walker.
-        with TibxDiskAdapter(FIXTURE, partition_offset=1024) as pa:
-            buf = pa.read(0, 512)
-        # Expected bytes via the whole-disk view.
+        """Adapter with ``partition_offset`` resolves to a real partition.
+
+        Uses the first MBR partition's byte offset so the adapter can
+        auto-discover its data_map volume_id.  The BPB at offset 0 of
+        the partition view must start with the NTFS magic
+        ``EB 52 90 'NTFS    '``.
+        """
         with TibxDiskAdapter(FIXTURE) as a:
-            ref = a.read(1024, 512)
-        self.assertEqual(buf, ref)
+            parts = a.list_mbr_partitions()
+        if not parts:
+            self.skipTest("no MBR partitions to probe")
+        p0 = parts[0]
+        with TibxDiskAdapter(FIXTURE, partition_offset=p0["byte_offset"]) as pa:
+            bpb = pa.read(0, 512)
+        self.assertEqual(bpb[:3], b"\xeb\x52\x90")
+        self.assertEqual(bpb[3:11], b"NTFS    ")
+        self.assertEqual(bpb[510:512], b"\x55\xaa")
 
     def test_ntfs_volume_instantiation_fails_cleanly(self) -> None:
         """``NtfsVolume`` against the whole-disk adapter fails predictably.
@@ -140,15 +148,12 @@ class TibxDiskAdapterTests(unittest.TestCase):
             adapter.close()
 
     def test_ntfs_bpb_parse_via_partial_volume(self) -> None:
-        """The BPB parser pulls 512 bytes via the adapter without crashing.
+        """``NtfsVolume`` bootstraps end-to-end on partition 0.
 
-        We don't assert the result is a valid NTFS BPB (the reference
-        archive's first partition starts at 1 MiB, past the bootstrap,
-        so the BPB itself isn't reachable yet).  We do assert that
-        feeding the adapter to ``_parse_boot_sector`` against a
-        *partition-relative* view fails with the expected
-        ``ChunkMapNotImplemented`` rather than a silent truncation or
-        a wrong-type exception.
+        After data_map / segment_map wiring landed, a partition-view
+        adapter can satisfy reads beyond the bootstrap region; the BPB
+        parser succeeds, the ``$MFT`` LCN is read from the BPB, and
+        MFT record 0 is fetched and validated as a ``FILE`` record.
         """
         from tibread.ntfs import NtfsVolume
 
@@ -156,14 +161,17 @@ class TibxDiskAdapterTests(unittest.TestCase):
             parts = a.list_mbr_partitions()
         if not parts:
             self.skipTest("no MBR partitions to probe")
-        # First partition: byte offset 1 MiB on this archive — past the
-        # bootstrap, so the BPB read must raise ChunkMapNotImplemented.
-        padapter = TibxDiskAdapter(FIXTURE, partition_offset=parts[0]["byte_offset"])
+        padapter = TibxDiskAdapter(
+            FIXTURE, partition_offset=parts[0]["byte_offset"]
+        )
         try:
-            tmp = NtfsVolume.__new__(NtfsVolume)
-            tmp.disk = padapter
-            with self.assertRaises(ChunkMapNotImplemented):
-                tmp._parse_boot_sector()
+            vol = NtfsVolume(padapter, build_index=False)
+            self.assertEqual(vol.cluster_size, 4096)
+            self.assertGreater(vol.mft_lcn, 0)
+            mft_rec0 = padapter.read(
+                vol.mft_lcn * vol.cluster_size, vol.mft_record_size
+            )
+            self.assertEqual(mft_rec0[:4], b"FILE")
         finally:
             padapter.close()
 

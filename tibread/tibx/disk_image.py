@@ -1,21 +1,19 @@
 """
-tibread.tibx.disk_image — source-disk LBA -> segment lookup helpers.
+tibread.tibx.disk_image — whole-disk LBA reads (bootstrap region).
 
-This module is the **planned** entry point for reading the bytes of the
-backed-up source disk via :class:`TibxReader`.  In a finished
-implementation, ``read_lba_range(start_lba, length)`` walks the
-``segment_map`` LSM tree (one of the seven LSM trees described in
-``tibread.tibx.lsm``) to translate a source-disk byte range into a list
-of ``(segment_id, offset_in_segment, length)`` tuples, decompresses the
-referenced segments, and concatenates the requested bytes.
+For full random-access reads anywhere on the source disk see
+:mod:`tibread.tibx.disk_adapter`, which combines
+:mod:`tibread.tibx.data_map` (TLV[1] source-byte → seg_id) with
+:mod:`tibread.tibx.segment_map` (TLV[2] seg_id → file offset).
+This module focuses on the simpler **whole-disk** view: the MBR plus
+the first 256 KiB of source content (which the archive stores
+unconditionally as the first SG segment, regardless of how the rest
+of the disk is sliced into the data_map).
 
 Status (as of April 2026)
 -------------------------
 
-The segment_map LSM tree's leaf-cell decoder is **not yet implemented**
-(it requires the Acronis Golomb / LZ4 codec from ``lsm_golomb.c`` —
-see :mod:`tibread.tibx.lsm`).  Until the cell decoder lands, this
-module exposes only a *bootstrap* path:
+The whole-disk path here serves only the bootstrap region:
 
 * The very first SG segment in the file (the segment beginning at the
   first ``0xFF`` page after the header pages) is empirically the
@@ -24,13 +22,11 @@ module exposes only a *bootstrap* path:
 * :func:`read_lba_range` can therefore satisfy any read whose byte
   range falls entirely inside ``[0, 262144)`` of the source disk by
   returning bytes from that first segment.
-* Reads that fall outside the bootstrap range raise
-  :class:`ChunkMapNotImplemented` until the segment_map walker is
-  finished.
-
-This is enough to verify the MBR signature and to prove the read
-plumbing end-to-end; arbitrary LBA reads will land once
-:func:`tibread.tibx.lsm.parse_leaf` learns to decode cells.
+* Reads outside the bootstrap range raise
+  :class:`ChunkMapNotImplemented` from this module — callers wanting
+  arbitrary access should use :class:`tibread.tibx.TibxDiskAdapter`
+  with a non-zero ``partition_offset`` (which routes through the
+  data_map / segment_map pair).
 
 Why there is no ``segment 3 = u16 chunk-id index``
 --------------------------------------------------
