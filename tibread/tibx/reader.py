@@ -156,6 +156,10 @@ class TibxReader:
                 f"{path}: file size {self.file_size} is not a multiple of "
                 f"{PAGE_SIZE} (not a valid .tibx page store)"
             )
+        if self.file_size == 0:
+            raise ValueError(
+                f"{path}: file is empty (not a valid .tibx page store)"
+            )
         self.page_count = self.file_size // PAGE_SIZE
         # Validate that page 0 looks like an ARCH/QARCH page so we fail
         # early on obviously-wrong inputs.
