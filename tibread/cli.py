@@ -871,6 +871,15 @@ def main(argv=None):
         if isinstance(e, UnsupportedTibFormat):
             print(f"error: {e}", file=sys.stderr)
             return 2
+        # The tibx-* commands deliberately raise plain ValueError /
+        # FileNotFoundError / IsADirectoryError / IOError for malformed
+        # input or missing files. Surface those as a clean one-line
+        # message rather than a Python traceback, and exit non-zero so
+        # shell pipelines see the failure.
+        if isinstance(e, (ValueError, FileNotFoundError, IsADirectoryError,
+                          PermissionError)):
+            print(f"error: {e}", file=sys.stderr)
+            return 2
         raise
 
 

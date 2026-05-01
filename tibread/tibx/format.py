@@ -92,15 +92,31 @@ SG_PAYLOAD_OFFSET = 0x2C       # Zstd frame begins here on the SG page
 #   +0x1A  2   cache (BE u16)  cache hint flags
 #   +0x1C 12   reserved/zero
 
-# Compression variants observed in the wild.  All three are Zstd frames;
-# the low byte appears to indicate the dictionary preset used by the
-# Acronis encoder (no externally-supplied dictionary is needed to decode
-# them — a stock zstd decompressor handles all three).
+# Compression variants observed in the wild.  The high byte selects the
+# compression family (0x03 = Zstd) and the low byte indexes a preset
+# dictionary used by the Acronis encoder (no externally-supplied
+# dictionary is needed to decode them — a stock zstd decompressor
+# handles every observed Zstd preset).
+#
+# The Zstd preset list was empirically verified by walking every SG
+# segment in the reference archive ``Jmicron 0102.tibx`` (263,063
+# segments total) and checking that every ``comp=0x03xx`` payload
+# starts with the Zstd frame magic ``28 b5 2f fd`` and decompresses to
+# ``len`` bytes.  Variant ``0x0303`` was missed by the original RE pass
+# (only one segment uses it in the reference archive: page 13,346,697)
+# and is added here so the reader covers the full population. See
+# ``docs/legacy/STRESS_TEST_RESULTS.md`` for the full histogram.
 COMP_NONE = 0x0000              # stored (uncompressed); zlen == len
 COMP_ZSTD_V0 = 0x0300
 COMP_ZSTD_V1 = 0x0301
 COMP_ZSTD_V2 = 0x0302
-ZSTD_COMP_VARIANTS = frozenset({COMP_ZSTD_V0, COMP_ZSTD_V1, COMP_ZSTD_V2})
+COMP_ZSTD_V3 = 0x0303
+ZSTD_COMP_VARIANTS = frozenset({
+    COMP_ZSTD_V0,
+    COMP_ZSTD_V1,
+    COMP_ZSTD_V2,
+    COMP_ZSTD_V3,
+})
 
 # Maximum number of compressed bytes that can fit on the SG page itself
 # (after the page envelope and the SG header).  Subsequent compressed
@@ -364,6 +380,7 @@ __all__ = [
     "COMP_ZSTD_V0",
     "COMP_ZSTD_V1",
     "COMP_ZSTD_V2",
+    "COMP_ZSTD_V3",
     "ZSTD_COMP_VARIANTS",
     "ZSTD_MAGIC",
     "crc32c",
