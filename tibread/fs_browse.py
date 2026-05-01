@@ -187,10 +187,12 @@ def _find_next_m_chunk(f, start: int, bound: int) -> int:
             cand = abs_carry_start + idx
             if cand >= bound:
                 return -1
-            # Quick reject: 4th byte's BTYPE bits must be 00 (stored).
+            # Quick reject: 4th byte's BTYPE bits must be a valid
+            # deflate value (00 stored, 01 fixed Huffman, 10 dynamic
+            # Huffman; 11 is reserved/invalid).
             if cand + 4 - abs_carry_start <= len(haystack):
                 fourth = haystack[cand + 3 - abs_carry_start]
-                if (fourth & 0x06) != 0x00:
+                if (fourth & 0x06) == 0x06:
                     search_from = idx + 1
                     continue
             # Full validation: actually inflate (with Adler32 check).
