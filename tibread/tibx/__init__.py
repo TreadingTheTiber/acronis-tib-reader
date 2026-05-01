@@ -25,6 +25,7 @@ from .format import (
     PAGE_TYPE_ARCI,
     PAGE_TYPE_LEAF,
     PAGE_TYPE_LDIR,
+    PAGE_TYPE_GOLOMB,
     PAGE_TYPE_LSM5,
     PAGE_TYPE_DATA,
     META_KEYS_MAX,
@@ -83,7 +84,8 @@ __all__ = [
     "PAGE_TYPE_ARCI",
     "PAGE_TYPE_LEAF",
     "PAGE_TYPE_LDIR",
-    "PAGE_TYPE_LSM5",
+    "PAGE_TYPE_GOLOMB",
+    "PAGE_TYPE_LSM5",       # back-compat alias for PAGE_TYPE_GOLOMB
     "PAGE_TYPE_DATA",
     # TLV[9] meta_keys + TLV[18] volume_table (format.py)
     "META_KEYS_MAX",

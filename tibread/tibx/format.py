@@ -11,7 +11,7 @@ The ``.tibx`` format is a 4 KiB-page store:
     ``0x02``      ARCI archive index / LSM root pointer page (commit info)
     ``0x03``      LEAF LSM-tree leaf page
     ``0x04``      LDIR LSM-tree directory / internal node
-    ``0x05``      LSM5 (interleaved index region; semantics under RE)
+    ``0x05``      GOLOMB Rice-coded delta-encoded sorted-hash dedup filter
     ``0xFF``      data page (Zstd segment header or continuation bytes)
     ============  ====================================================
 
@@ -49,15 +49,23 @@ PAGE_TYPE_ARCH = 0x01       # archive header / metadata
 PAGE_TYPE_ARCI = 0x02       # archive index (LSM root / commit info)
 PAGE_TYPE_LEAF = 0x03       # LSM leaf
 PAGE_TYPE_LDIR = 0x04       # LSM directory / internal node
-PAGE_TYPE_LSM5 = 0x05       # interleaved-index region page (semantics TBD)
+PAGE_TYPE_GOLOMB = 0x05     # Golomb-Rice (M=256) sorted-hash dedup filter
 PAGE_TYPE_DATA = 0xFF       # data (SG segment header or continuation)
+
+# Back-compat alias — the page was originally documented as ``LSM5`` while
+# its semantics were under RE. The current name is :data:`PAGE_TYPE_GOLOMB`,
+# which matches the ``golomb.c`` writer in ``archive3.dll`` (function
+# ``golomb_index_create`` and friends; v7 archive-upgrade log message
+# ``"Upgrade ver.7: create golomb filter"``). Existing callers that import
+# ``PAGE_TYPE_LSM5`` continue to work.  See ``ARCHIVE3_PAGE_05.md``.
+PAGE_TYPE_LSM5 = PAGE_TYPE_GOLOMB
 
 PAGE_TYPE_NAMES = {
     PAGE_TYPE_ARCH: "ARCH",
     PAGE_TYPE_ARCI: "ARCI",
     PAGE_TYPE_LEAF: "LEAF",
     PAGE_TYPE_LDIR: "LDIR",
-    PAGE_TYPE_LSM5: "LSM5",
+    PAGE_TYPE_GOLOMB: "GOLOMB",
     PAGE_TYPE_DATA: "DATA",
 }
 
@@ -339,7 +347,8 @@ __all__ = [
     "PAGE_TYPE_ARCI",
     "PAGE_TYPE_LEAF",
     "PAGE_TYPE_LDIR",
-    "PAGE_TYPE_LSM5",
+    "PAGE_TYPE_GOLOMB",
+    "PAGE_TYPE_LSM5",       # back-compat alias for PAGE_TYPE_GOLOMB
     "PAGE_TYPE_DATA",
     "PAGE_TYPE_NAMES",
     "INNER_MAGIC_QARCH",
