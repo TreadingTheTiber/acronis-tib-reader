@@ -1,50 +1,69 @@
 """
-chunkmap_fs.py — partial walker for the FS-mode hybrid `.tib` variant.
+chunkmap_fs.py — walker for the FS-mode hybrid `.tib` variant.
 
 This is the layout produced by Acronis True Image when backing up a
-file share rather than a block device. We've seen exactly one specimen
-in the wild (filename `NAS_Backup_full_b26_s1_v1.tib`, TI 2016). The
-volume header is byte-shape-identical to sector-mode (magic
-``0xA2B924CE``) but the trailer magic is ``0x94E18A2C`` (FS-mode
-sentinel) and the body is a sequence of single-byte-tagged zlib
-streams rather than a sector-mode block stream:
+file share rather than a block device. We've seen one specimen in the
+wild (`NAS_Backup_full_b26_s1_v1.tib`, TI 2016). The volume header is
+byte-shape-identical to sector-mode (magic ``0xA2B924CE``) but the
+trailer magic is ``0x94E18A2C`` (FS-mode sentinel) and the body is a
+generic block-store stream of three record types:
 
     [u8 type] [zlib stream]
     [u8 type] [zlib stream]
     ...
 
-Type codes observed (ASCII letters):
+Per Ghidra RE on `archive_data_stream_tib_file_impl.cpp` and
+empirical dissection of real records:
 
 * ``0x6D`` ('m') — file-content chunk (≤ 256 KiB plaintext, zlib STORED)
-* ``0x6E`` ('n') — end-of-file separator (8-byte zlib-of-empty)
-* ``0x66`` ('f') — directory / metadata record. **Format unknown.**
-  Empirically these are 3–8 KiB long, appear roughly every 22–25 files,
-  and start with a fixed 8-byte signature ``66 63 60 00 02 00 1d f7``.
-  We currently skip them by scanning forward for the next valid
-  ``[m|n][78 01]`` pattern.
+* ``0x6E`` ('n') — end-of-file marker (8-byte zlib-of-empty)
+* ``0x66`` ('f') — **metadata-batch start**. Despite appearing as a
+  single "record" to a naive walker, an f-batch is a sequence of N
+  ``[44-byte preamble][zlib stream → ~400-byte Acronis-serialized NTFS
+  attribute blob]`` pairs (N typically 9–20). Each preamble starts
+  with ``66 63 60 00 02 00 1d f7 22 c6 01`` (11 fixed bytes), then 11
+  bytes that vary on first stream of a batch, then 22 bytes of cursor
+  state (likely u32 file_index + u8[16] md5 + u16 flags), then the
+  ``78 01`` zlib magic. The inflated payload has fixed magic
+  ``01 02 00 10 01 00 00 00`` followed by ``u64 file_size``,
+  ``u32 num_extents``, padding, ``u8[16] md5``, an extent table
+  (32 B × N), then a 208-byte trailer = NTFS Security Descriptor +
+  optional ADS attribute name as UTF-16-LE.
+
+Each f-batch is a **prefix manifest** for the next N files in the
+m/n stream — verified by sandwich evidence: the JPEG following one
+f-batch contained EXIF for the camera the metadata identified.
 
 A "logical file" is the run of ``m`` chunks ending at the next ``n``.
+``f`` records are out-of-band metadata, NOT iterated by the file
+cursor and NOT a file boundary — the writer flushes accumulated
+metadata into the same physical block stream periodically.
 
 Limitations
 -----------
 
-* Filenames live in the ``f`` records (presumably) and we don't decode
-  them yet, so recovered files are emitted as numbered blobs with a
-  content-magic-based extension (``recovered_000001.jpg`` etc.).
-* The last ~16 MiB before the trailer is high-entropy — likely an
-  encrypted index — and the walker halts when it can no longer find
-  valid records. That's typically where the body ends anyway.
+* **Primary filenames are unknown.** They live in a separate directory
+  tree blob, likely in the high-entropy 16 MiB region near EOF that
+  we currently halt at. Files are emitted as ``recovered_NNNNNN.<ext>``
+  with the extension sniffed from content magic.
 * This walker has only been validated against the single
-  ``NAS_Backup_full_b26_s1_v1.tib`` sample. Other share-mode .tib files
-  may use additional record types we haven't seen.
+  ``NAS_Backup_full_b26_s1_v1.tib`` sample. Other share-mode .tib
+  files may use additional record types we haven't seen, and v2 of
+  the FS-mode format (TI 2018+) uses a flat ``u64`` cursor stride
+  instead of the v1 ``(u32 index, u8[16] md5)`` chained MD5 model.
 
 References
 ----------
 
 * Static-RE notes from the Ghidra session on Acronis True Image's
-  ``product.bin`` (``ChunkMapAndHashImpl`` / ``HybridChunkMapAndHash``
-  vtables at RVA ``09578a38`` / ``09576000``).
-* Empirical sample-dissection notes from the same investigation.
+  ``product.bin`` (``FUN_08533640`` v1 OpenForRead, ``FUN_08530170``
+  GetValue, ``FUN_0852ca40`` MoveNext, ``FUN_085313f0`` directory-tree
+  copy, ``FUN_0853b380`` cursor init).
+* Empirical sample-dissection of the three f-batches at file offsets
+  0x163b8f6 (20 streams), 0x43353b0 (12 streams), 0x589e506 (9 streams)
+  in the reference NAS_Backup file.
+* See also ``/home/colin/tibread/FILESYSTEM_MODE_TIB.md`` (RE Agent K,
+  2026-04-30) for the higher-level iterator / vtable layout.
 """
 from __future__ import annotations
 
@@ -77,6 +96,215 @@ class FsRecord:
     type_byte: int        # 0x6D / 0x6E / 0x66 / unknown
     comp_len: int         # length of the zlib stream (0 if no zlib)
     plain: Optional[bytes]  # decompressed bytes; None if record was skipped
+
+
+# Per-stream preamble inside an f-batch. Verified empirically across all
+# 41 streams in the three observed f-batches.
+META_PREAMBLE_LEN = 44
+META_PREAMBLE_FIXED = bytes.fromhex("6663600002001df722c601")  # first 11 bytes
+
+# The inflated metadata blob's fixed leading magic.
+META_BLOB_MAGIC = bytes.fromhex("0102001001000000")  # 8 bytes
+
+# Trailing region after the extent table is constant size.
+META_TRAILER_LEN = 208
+
+
+@dataclass
+class FsExtent:
+    """One per-extent entry inside a file's metadata blob (32 bytes)."""
+    md5: bytes              # 16-byte md5 of the extent's content
+    attr_id: int            # u32 — likely DATA-stream identifier
+    logical_offset: int     # u64 — offset of this extent in the file
+
+
+@dataclass
+class FsFileMetadata:
+    """Per-file metadata extracted from one stream inside an f-batch.
+
+    Each f-batch is a prefix manifest: this metadata describes one of
+    the next N files emitted in the `m`/`n` stream. The order within
+    the batch matches the order of files that follow.
+    """
+    file_size: int          # u64 — authoritative file size
+    num_extents: int        # u32
+    md5_content: bytes      # u8[16] — MD5(file content); matches MoveNext cursor
+    extents: list           # list[FsExtent]
+    security_descriptor: bytes  # NTFS SD (relative form), or b'' if absent
+    ads_name: Optional[str]     # UTF-16-LE-decoded ADS attribute name, e.g.
+                                # ":encryptable:$DATA"; None if no ADS
+
+
+def _consume_zlib_from_bytes(data: bytes, offset: int = 0) -> Tuple[int, bytes]:
+    """Inflate a zlib stream starting at ``data[offset:]``. Returns
+    (compressed_length, decompressed_bytes)."""
+    d = zlib.decompressobj()
+    plain = d.decompress(data[offset:])
+    consumed = len(data) - offset - len(d.unused_data)
+    return consumed, plain
+
+
+def _decode_metadata_blob(blob: bytes) -> Optional[FsFileMetadata]:
+    """Parse one inflated f-batch metadata blob.
+
+    The blob layout is:
+
+      +0x00  u8[8]   magic = 01 02 00 10 01 00 00 00
+      +0x08  u64     file_size
+      +0x10  u32     num_extents
+      +0x14  u64     reserved (zero)
+      +0x1C  u32     reserved (varies)
+      +0x20  u32     reserved (varies)
+      +0x24  u32     zero
+      +0x28  u8[16]  md5_of_file_content (matches MoveNext cursor)
+      +0x38  u8[8]   tail-marker (varies — class-id?)
+      +0x40  FsExtent[num_extents]    32 B each
+      +0x40+32N      Variable-length trailer:
+                       - 8 B padding zeros
+                       - NTFS Security Descriptor (variable length —
+                         R3 had 140 B, R2 had ~200 B)
+                       - Optional ADS-attribute slot:
+                            u32 attr_id, u32 zero, u32 name_byte_len,
+                            u16[name_byte_len/2] UTF-16-LE name
+                       - u64 file_size_replica + 16 B zeros
+
+    Returns None if the magic doesn't match or the extent count is
+    implausible (so we don't drift on misaligned input).
+    """
+    import struct
+    MIN_TRAILER = 24   # at minimum: 8 B pad + 16 B trailing zeros
+    if len(blob) < 0x40 + MIN_TRAILER:
+        return None
+    if blob[:8] != META_BLOB_MAGIC:
+        return None
+    file_size = struct.unpack_from("<Q", blob, 0x08)[0]
+    num_extents = struct.unpack_from("<I", blob, 0x10)[0]
+    if num_extents > 4096:
+        return None
+    extent_table_end = 0x40 + 32 * num_extents
+    if extent_table_end + MIN_TRAILER > len(blob):
+        return None
+    md5 = bytes(blob[0x28:0x38])
+
+    extents = []
+    eo = 0x40
+    for _ in range(num_extents):
+        ext_md5 = bytes(blob[eo:eo + 16])
+        attr_id = struct.unpack_from("<I", blob, eo + 16)[0]
+        log_off = struct.unpack_from("<Q", blob, eo + 24)[0]
+        extents.append(FsExtent(md5=ext_md5, attr_id=attr_id,
+                                logical_offset=log_off))
+        eo += 32
+
+    trailer = blob[eo:]
+    # The trailer holds the NTFS Security Descriptor (variable-length,
+    # starts after 8 bytes of zero padding) and optionally an
+    # ADS-attribute-name slot. We extract:
+    #   * The full SD bytes [confirmed: revision=1, control=0x8004 in
+    #     observed samples]
+    #   * The ADS name as UTF-16-LE if a name slot is present and decodes
+    sd = b""
+    ads = None
+    # Skip leading 8 bytes of padding zeros, then SD starts.
+    sd_start = 8
+    if len(trailer) > sd_start + 4:
+        rev = trailer[sd_start]
+        if rev == 1:
+            # NTFS SD relative-form: rev=1 + sbz + control u16 + 4×u32
+            # offset_owner / offset_group / offset_sacl / offset_dacl.
+            # The SD's true length is hard to pin down without parsing
+            # the ACE lists; we use the offset to the ADS-name slot
+            # (if any) as a delimiter. Heuristic: scan the trailer for
+            # a u32 that looks like a UTF-16-byte-length (multiple of 2,
+            # 2..255) followed by valid UTF-16-LE bytes.
+            sd_end = len(trailer)
+            for probe in range(sd_start + 16, len(trailer) - 12, 4):
+                attr_id = int.from_bytes(trailer[probe:probe + 4], "little")
+                _zero = int.from_bytes(trailer[probe + 4:probe + 8], "little")
+                name_len = int.from_bytes(trailer[probe + 8:probe + 12], "little")
+                if (_zero == 0 and 4 <= name_len <= 200 and name_len % 2 == 0
+                        and probe + 12 + name_len <= len(trailer)):
+                    name_bytes = trailer[probe + 12:probe + 12 + name_len]
+                    try:
+                        candidate = name_bytes.decode("utf-16-le")
+                    except UnicodeDecodeError:
+                        continue
+                    if candidate.startswith(":") or candidate.startswith("$"):
+                        ads = candidate
+                        sd_end = probe
+                        break
+            sd = bytes(trailer[sd_start:sd_end])
+    return FsFileMetadata(
+        file_size=file_size,
+        num_extents=num_extents,
+        md5_content=md5,
+        extents=extents,
+        security_descriptor=sd,
+        ads_name=ads,
+    )
+
+
+def _find_next_zlib(buf: bytes, start: int, max_lookahead: int = 80) -> int:
+    """Scan forward up to ``max_lookahead`` bytes for ``0x78 0x01``.
+
+    The per-stream preamble in an f-batch has a variable-length cursor
+    field (we've seen 20- and 22-byte variants ending in ``0x6C``), so
+    we can't assume a fixed offset. ``max_lookahead`` of 80 covers all
+    observed forms with margin.
+    """
+    end = min(len(buf) - 1, start + max_lookahead)
+    for i in range(start, end):
+        if buf[i] == 0x78 and buf[i + 1] == 0x01:
+            return i
+    return -1
+
+
+def parse_metadata_batch(batch_bytes: bytes) -> list:
+    """Parse one f-batch (the contiguous bytes spanning a sequence of
+    ``[variable-length preamble][zlib stream]`` pairs). Returns
+    ``list[FsFileMetadata]`` — one per stream in the batch, in order.
+
+    Robust against:
+      * Variable preamble length (20- or 22-byte cursor → 42- or 44-byte
+        total preamble).
+      * Variable-length trailer (R3 had 208 B, R2 had ~292 B — depends
+        on Security Descriptor and ADS-name complexity).
+      * False-positive signature matches inside compressed payload
+        (those simply fail the inflate or magic check and get skipped).
+      * Non-standard first record (R1 of the reference file is a
+        single raw-deflate volume blob, not a metadata batch — we
+        return [] for those rather than partial garbage).
+    """
+    import re
+    n = len(batch_bytes)
+    if n < len(META_PREAMBLE_FIXED) + 4:
+        return []
+    sigs = [m.start() for m in
+            re.finditer(re.escape(META_PREAMBLE_FIXED), batch_bytes)]
+    if not sigs:
+        return []
+
+    out = []
+    last_consumed_end = 0
+    for sig_pos in sigs:
+        # Skip signatures that fall inside an already-consumed zlib stream
+        # (those are false positives from compressed data).
+        if sig_pos < last_consumed_end:
+            continue
+        zlib_off = _find_next_zlib(batch_bytes,
+                                   sig_pos + len(META_PREAMBLE_FIXED),
+                                   max_lookahead=80)
+        if zlib_off < 0:
+            continue
+        try:
+            comp_len, plain = _consume_zlib_from_bytes(batch_bytes, zlib_off)
+        except zlib.error:
+            continue
+        meta = _decode_metadata_blob(plain)
+        if meta is not None:
+            out.append(meta)
+            last_consumed_end = zlib_off + comp_len
+    return out
 
 
 def _consume_zlib(f, max_extra: int = 16 << 20) -> Tuple[int, bytes]:
@@ -164,9 +392,10 @@ def walk_fs_records(tib_path: str, *, max_records: Optional[int] = None,
       * an unknown record type is hit AND no further known record can
         be found within ``SKIP_LOOKAHEAD`` bytes
 
-    Yields :class:`FsRecord` tuples. ``f`` records are yielded with
-    ``plain=None`` and ``comp_len`` set to the bytes skipped to reach
-    the next known record.
+    Yields :class:`FsRecord` tuples. For ``f`` (metadata batch) records
+    and any other unknown type, ``plain`` is set to the raw batch bytes
+    (caller can pass to :func:`parse_metadata_batch` for f records) and
+    ``comp_len`` is the on-disk span until the next known record.
     """
     file_size = os.path.getsize(tib_path)
     end = min(file_size, max_offset) if max_offset is not None else file_size
@@ -204,12 +433,15 @@ def walk_fs_records(tib_path: str, *, max_records: Optional[int] = None,
                     return
                 continue
 
-            # Unknown record type — try to skip past it.
+            # Unknown record type — try to skip past it. Capture the raw
+            # bytes so callers can decode f-batch metadata.
             nxt = _find_next_known_record(f, cur + 1, end)
             if nxt is None:
                 return
+            f.seek(cur)
+            raw = f.read(nxt - cur)
             yield FsRecord(offset=cur, type_byte=t, comp_len=nxt - cur,
-                           plain=None)
+                           plain=raw)
             cur = nxt
             yielded += 1
             if max_records is not None and yielded >= max_records:
@@ -273,66 +505,136 @@ def extract_files(tib_path: str, output_dir: str, *,
     Files are named ``recovered_NNNNNN.ext`` where ``ext`` is sniffed
     from the file's first bytes (``jpg``, ``png``, ``mp4``, ``txt``,
     ``bin`` for unknown).
+
+    Per the static-RE finding that ``f`` records are out-of-band
+    metadata (NOT file boundaries — the writer just flushes
+    accumulated NTFS-attribute blobs into the same physical block
+    stream periodically), we DO NOT flush partial chunks when an
+    ``f`` record appears. Only ``n`` records terminate a file.
+
+    When an ``f`` record is encountered, its metadata batch is parsed
+    and applied **retroactively** to the most recently emitted files —
+    each f-batch is the **postfix manifest** for the batch of files
+    that immediately preceded it (verified empirically by matching
+    metadata file_size values to recovered file sizes). Cross-validates
+    file_size / md5 and writes ``metadata.jsonl`` to the output dir.
     """
+    import hashlib
+    import json
+
     os.makedirs(output_dir, exist_ok=True)
 
-    cur_chunks: list[bytes] = []
+    # Track every emitted file so we can post-annotate them once the
+    # corresponding f-batch arrives.
+    @dataclass
+    class _EmittedFile:
+        index: int
+        path: str
+        size: int
+        md5: bytes
+        meta: Optional[FsFileMetadata] = None
+
+    emitted: list = []
+    cur_chunks: list = []
     file_count = 0
     skipped_records = 0
     total_bytes = 0
+    metadata_size_match = 0
+    metadata_size_mismatch = 0
+    metadata_md5_match = 0
+    next_unannotated_idx = 0  # index into `emitted` of next file to label
+
+    def flush_file():
+        nonlocal file_count, total_bytes
+        if not cur_chunks:
+            return
+        content = b"".join(cur_chunks)
+        ext = _sniff_extension(content)
+        file_count += 1
+        out_path = os.path.join(
+            output_dir, f"recovered_{file_count:06d}.{ext}"
+        )
+        with open(out_path, "wb") as out:
+            out.write(content)
+        total_bytes += len(content)
+        emitted.append(_EmittedFile(
+            index=file_count,
+            path=os.path.basename(out_path),
+            size=len(content),
+            md5=hashlib.md5(content).digest(),
+        ))
+        cur_chunks.clear()
+
+    def apply_batch(batch: list):
+        """Pair the N metadata blobs in ``batch`` with the N most
+        recently emitted files (in order) that don't yet have metadata."""
+        nonlocal next_unannotated_idx
+        nonlocal metadata_size_match, metadata_size_mismatch, metadata_md5_match
+        for meta in batch:
+            if next_unannotated_idx >= len(emitted):
+                # Metadata extends past what we've emitted (can happen
+                # if the walker bailed early). Drop the spillover.
+                break
+            ef = emitted[next_unannotated_idx]
+            ef.meta = meta
+            if meta.file_size == ef.size:
+                metadata_size_match += 1
+            else:
+                metadata_size_mismatch += 1
+            if meta.md5_content == ef.md5:
+                metadata_md5_match += 1
+            next_unannotated_idx += 1
 
     for rec in walk_fs_records(tib_path, max_offset=max_offset):
         if rec.type_byte == TYPE_FILE_CHUNK and rec.plain is not None:
             cur_chunks.append(rec.plain)
         elif rec.type_byte == TYPE_FILE_END:
-            if cur_chunks:
-                content = b"".join(cur_chunks)
-                ext = _sniff_extension(content)
-                file_count += 1
-                out_path = os.path.join(
-                    output_dir, f"recovered_{file_count:06d}.{ext}"
-                )
-                with open(out_path, "wb") as out:
-                    out.write(content)
-                total_bytes += len(content)
-                if progress and file_count % 100 == 0:
-                    print(f"[tibread]   {file_count} files, "
-                          f"{total_bytes / (1 << 20):.1f} MiB recovered",
-                          flush=True)
-                cur_chunks = []
-                if max_files is not None and file_count >= max_files:
-                    break
-        else:
-            # f record or unknown skip — content boundary unknown; if we
-            # had partial chunks, flush them as a recovered fragment.
+            flush_file()
+            if progress and file_count % 100 == 0 and file_count:
+                print(f"[tibread]   {file_count} files, "
+                      f"{total_bytes / (1 << 20):.1f} MiB, "
+                      f"{metadata_size_match} metadata-validated",
+                      flush=True)
+            if max_files is not None and file_count >= max_files:
+                break
+        elif rec.type_byte == TYPE_DIR_RECORD and rec.plain is not None:
+            try:
+                batch = parse_metadata_batch(rec.plain)
+            except Exception:
+                batch = []
+            apply_batch(batch)
             skipped_records += 1
-            if cur_chunks:
-                content = b"".join(cur_chunks)
-                ext = _sniff_extension(content)
-                file_count += 1
-                out_path = os.path.join(
-                    output_dir, f"recovered_{file_count:06d}.{ext}"
-                )
-                with open(out_path, "wb") as out:
-                    out.write(content)
-                total_bytes += len(content)
-                cur_chunks = []
-                if max_files is not None and file_count >= max_files:
-                    break
+        else:
+            skipped_records += 1
 
-    if cur_chunks:
-        content = b"".join(cur_chunks)
-        ext = _sniff_extension(content)
-        file_count += 1
-        out_path = os.path.join(output_dir, f"recovered_{file_count:06d}.{ext}")
-        with open(out_path, "wb") as out:
-            out.write(content)
-        total_bytes += len(content)
+    flush_file()
+
+    # Write the sidecar manifest now that all metadata is paired.
+    with open(os.path.join(output_dir, "metadata.jsonl"), "w") as side:
+        for ef in emitted:
+            m = ef.meta
+            side.write(json.dumps({
+                "file_index": ef.index,
+                "output": ef.path,
+                "size": ef.size,
+                "md5": ef.md5.hex(),
+                "expected_size": m.file_size if m else None,
+                "size_ok": (m is not None and m.file_size == ef.size),
+                "md5_ok": (m is not None and m.md5_content == ef.md5),
+                "ads_name": m.ads_name if m else None,
+                "num_extents": m.num_extents if m else None,
+                "has_security_descriptor": (
+                    bool(m and m.security_descriptor) if m else False
+                ),
+            }) + "\n")
 
     if progress:
         print(f"[tibread] done: {file_count} files, "
-              f"{total_bytes / (1 << 20):.1f} MiB recovered, "
-              f"{skipped_records} unknown/`f` records skipped",
+              f"{total_bytes / (1 << 20):.1f} MiB recovered. "
+              f"Metadata: {metadata_size_match} size-matched, "
+              f"{metadata_size_mismatch} mismatch, "
+              f"{metadata_md5_match} md5-matched. "
+              f"({skipped_records} f/unknown records seen)",
               flush=True)
 
     return file_count
@@ -343,8 +645,13 @@ __all__ = [
     "TYPE_FILE_CHUNK",
     "TYPE_FILE_END",
     "TYPE_DIR_RECORD",
+    "META_PREAMBLE_LEN",
+    "META_BLOB_MAGIC",
     "FsRecord",
+    "FsExtent",
+    "FsFileMetadata",
     "walk_fs_records",
     "is_fs_mode_hybrid",
     "extract_files",
+    "parse_metadata_batch",
 ]
