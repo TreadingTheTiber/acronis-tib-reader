@@ -149,25 +149,91 @@ def _skip_zlib_chunk(f, start_off: int) -> Tuple[int, int]:
     return _slow_zlib_skip(f, start_off)
 
 
+def _find_next_m_chunk(f, start: int, bound: int) -> int:
+    """Find the file offset of the next valid 'm' content chunk in
+    [start, bound), skipping past compressed-data byte noise.
+
+    Scan for the 3-byte signature ``6d 78 01`` (m record + zlib
+    header) and validate each hit by **actually decompressing** the
+    chunk via ``zlib.decompress``. Header-only validation lets ~1 in
+    65,536 random byte positions through, so over a 1 GB f-batch we'd
+    accept tens of thousands of false positives; full decompression's
+    integrated Adler32 check eliminates them.
+
+    The decompression cost is one full chunk inflate per f-batch
+    boundary (≤ 150 such boundaries in NAS_Backup) — negligible
+    compared to the cost of a wrong-positioned drift through the rest
+    of the archive.
+
+    Returns ``-1`` if no valid candidate is found within ``bound``.
+    """
+    SIG = b"\x6d\x78\x01"
+    READ_SIZE = 65536
+    overlap = len(SIG) - 1
+    pos = start
+    carry = b""
+    abs_carry_start = pos
+    while pos < bound:
+        f.seek(pos)
+        chunk = f.read(min(READ_SIZE, bound - pos))
+        if not chunk:
+            return -1
+        haystack = carry + chunk
+        search_from = 0
+        while True:
+            idx = haystack.find(SIG, search_from)
+            if idx < 0:
+                break
+            cand = abs_carry_start + idx
+            if cand >= bound:
+                return -1
+            # Quick reject: 4th byte's BTYPE bits must be 00 (stored).
+            if cand + 4 - abs_carry_start <= len(haystack):
+                fourth = haystack[cand + 3 - abs_carry_start]
+                if (fourth & 0x06) != 0x00:
+                    search_from = idx + 1
+                    continue
+            # Full validation: actually inflate (with Adler32 check).
+            f.seek(cand + 1)
+            try:
+                d = zlib.decompressobj()
+                # 1 MB window covers any single m chunk (max 256 KiB
+                # plain + zlib overhead).
+                buf = f.read(1 << 20)
+                plain = d.decompress(buf)
+                while not d.eof:
+                    more = f.read(64 * 1024)
+                    if not more:
+                        break
+                    plain += d.decompress(more)
+                if d.eof and 0 < len(plain) <= 262175:
+                    return cand
+            except zlib.error:
+                pass
+            search_from = idx + 1
+        carry = haystack[-overlap:] if overlap > 0 else b""
+        abs_carry_start = pos + len(chunk) - len(carry)
+        pos += len(chunk)
+    return -1
+
+
 def _slow_zlib_skip(f, start_off: int, max_read: int = 65536) -> Tuple[int, int]:
-    """Inflate up to ``max_read`` bytes starting at ``start_off`` and
-    report the consumed length + decompressed length. Used for non-
-    stored deflate streams (fixed/dynamic Huffman)."""
+    """Inflate the zlib stream at ``start_off`` and report the
+    consumed length + decompressed length. Used as a fallback for non-
+    stored deflate streams (fixed/dynamic Huffman) and as a validator
+    for f-batch boundary candidates."""
     f.seek(start_off)
-    buf = f.read(max_read)
     d = zlib.decompressobj()
-    plain = d.decompress(buf)
-    if not d.eof:
-        # If we hit max_read without EOF, the chunk is bigger than
-        # we expected; widen the window and retry.
-        chunks = [plain]
-        while not d.eof:
-            more = f.read(64 * 1024)
-            if not more:
-                raise ValueError(f"unexpected EOF in zlib at {start_off}")
-            chunks.append(d.decompress(more))
-        plain = b"".join(chunks)
-    consumed = len(buf) - len(d.unused_data)
+    plain_chunks = []
+    total_input = 0
+    while not d.eof:
+        buf = f.read(max_read)
+        if not buf:
+            raise ValueError(f"unexpected EOF in zlib at {start_off}")
+        plain_chunks.append(d.decompress(buf))
+        total_input += len(buf)
+    plain = b"".join(plain_chunks)
+    consumed = total_input - len(d.unused_data)
     return consumed, len(plain)
 
 
@@ -223,13 +289,18 @@ def build_index(tib_path: str, *, progress: bool = False) -> FsArchiveIndex:
         # don't need its contents for indexing — just need to find the
         # next m/n record. Scan forward looking for that boundary.
         FBATCH_SKIP_LOOKAHEAD = 16 * 1024 * 1024   # plenty for any seen f-batch
-        # Recognize the directory-tree blob's leading byte 0x65 ('e');
-        # if we hit it, stop walking — beyond that lies the trailing
-        # region we already decoded separately.
-        DIRTREE_TYPE_BYTE = 0x65
+
+        # The trailing directory-tree blob lives at a known offset
+        # encoded in the 16-byte self-locator just before the trailer
+        # (verified separately by `decode_directory_tree`). The walk
+        # ends once we reach that offset.
+        f.seek(concat_end - 4 - 16)
+        loc = f.read(16)
+        body_rel_off = struct.unpack_from("<Q", loc, 8)[0]
+        dirtree_start = DATA_START + body_rel_off
 
         cur = DATA_START
-        while cur < concat_end - 4:
+        while cur < dirtree_start:
             f.seek(cur)
             tag = f.read(1)
             if not tag:
@@ -270,32 +341,15 @@ def build_index(tib_path: str, *, progress: bool = False) -> FsArchiveIndex:
                                   flush=True)
                             last_progress = time.monotonic()
                 cur += 1 + comp_len
-            elif t == DIRTREE_TYPE_BYTE:
-                # We've reached the trailing region — stop.
-                break
             else:
-                # Inside an f-batch or unknown record. Scan forward in
-                # 64 KB windows for the next [m|n][78 01] pattern.
-                next_off = -1
-                window_start = cur + 1
-                while window_start < min(concat_end - 4,
-                                         cur + FBATCH_SKIP_LOOKAHEAD):
-                    f.seek(window_start)
-                    chunk = f.read(min(65536,
-                                       concat_end - 4 - window_start))
-                    if not chunk:
-                        break
-                    for i in range(len(chunk) - 2):
-                        b = chunk[i]
-                        if (b in (TYPE_FILE_CHUNK, TYPE_FILE_END)
-                                and chunk[i + 1] == 0x78
-                                and chunk[i + 2] == 0x01):
-                            next_off = window_start + i
-                            break
-                    if next_off >= 0:
-                        break
-                    # Keep a 2-byte overlap in case the pattern straddles.
-                    window_start += max(1, len(chunk) - 2)
+                # Inside an f-batch or unknown record. f-batches in
+                # this corpus always come AFTER a completed file
+                # (i.e. after an 'n'), so the next thing we want is
+                # the FIRST m chunk of the next batch's first file.
+                next_off = _find_next_m_chunk(
+                    f, cur + 1,
+                    bound=min(dirtree_start, cur + FBATCH_SKIP_LOOKAHEAD),
+                )
                 if next_off < 0:
                     break
                 cur = next_off
