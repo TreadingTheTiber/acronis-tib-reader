@@ -168,7 +168,7 @@ class TibxChainsFixtureTests(unittest.TestCase):
                 self.assertGreaterEqual(s.mtime, s.ctime)
                 self.assertLess(s.mtime, hi)
 
-    def test_jmicron_fixture_specifics(self) -> None:
+    def test_example_fixture_specifics(self) -> None:
         """Pin down the empirical ground truth for the reference archive."""
         # We know slice_id=2 is in the mem-tree.
         sids = {s.slice_id for s in self.slices}

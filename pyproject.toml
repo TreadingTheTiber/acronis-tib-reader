@@ -3,13 +3,13 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tibread"
-version = "0.2.0"
-description = "Pure-Python read-only access to Acronis True Image .tib backups."
+name = "acronis-tib-reader"
+version = "0.3.0"
+description = "Pure-Python read-only access to Acronis True Image .tib and .tibx backups."
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [
-    { name = "tibread contributors" },
+    { name = "TreadingTheTiber" },
 ]
 requires-python = ">=3.9"
 classifiers = [
@@ -38,8 +38,8 @@ fast = ["numpy>=1.20"]
 tib = "tibread.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/yourname/tibread"
-Issues = "https://github.com/yourname/tibread/issues"
+Homepage = "https://github.com/TreadingTheTiber/acronis-tib-reader"
+Issues = "https://github.com/TreadingTheTiber/acronis-tib-reader/issues"
 
 [tool.setuptools.packages.find]
 include = ["tibread*"]

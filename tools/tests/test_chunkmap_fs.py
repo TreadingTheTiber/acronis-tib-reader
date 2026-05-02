@@ -217,15 +217,13 @@ class ExtensionSniffTests(unittest.TestCase):
 
 # ---- end-to-end against the real fixture (best-effort) -------------------
 
-REAL_FIXTURE = (
-    "/path/to/archives/"
-    "2022.11 Example Backups/examplehost/share_backup_example.tib"
-)
+REAL_FIXTURE = os.environ.get("TIBREAD_FS_FIXTURE", "")
 
 
 @unittest.skipUnless(
-    os.path.exists(REAL_FIXTURE),
-    "real share_backup fixture not available",
+    REAL_FIXTURE and os.path.exists(REAL_FIXTURE),
+    "real FS-mode fixture not available "
+    "(set TIBREAD_FS_FIXTURE=/path/to/archive.tib to enable)",
 )
 class RealFixtureTests(unittest.TestCase):
     def test_real_fixture_classified_as_hybrid(self) -> None:
