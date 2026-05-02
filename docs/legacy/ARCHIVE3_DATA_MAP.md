@@ -76,7 +76,7 @@ extent fills its entire segment" — no per-segment indexing required.
 Smaller / packed segments use `extent_index = 0, 1, 2, ...` to
 disambiguate which extent in the segment is being referred to.
 
-## Sample lookups against `Jmicron 0102.tibx`
+## Sample lookups against `example.tibx`
 
 These are the empirically-verified ground-truth lookups pinned by
 `tools/tests/test_tibx_data_map.py`:

@@ -14,7 +14,7 @@ the GitHub web UI.
 ### Option A — `gh` CLI (recommended)
 
 ```bash
-cd /home/colin/tibread/dist
+cd /path/to/tibread/dist
 
 # Create the repo on GitHub and add it as a remote in one shot.
 # Use --public for an open-source release, or --private for a private repo.
@@ -36,14 +36,14 @@ controlled second step (next section).
    with a README, .gitignore, or license — the repo already has those.
 3. From the local clone:
    ```bash
-   cd /home/colin/tibread/dist
+   cd /path/to/tibread/dist
    git remote add origin git@github.com:<user>/tibread.git
    ```
 
 ## Push the initial release
 
 ```bash
-cd /home/colin/tibread/dist
+cd /path/to/tibread/dist
 
 # Push master branch and set upstream.
 git push -u origin master
@@ -60,7 +60,7 @@ Turning the `v0.1.0` tag into a proper Release surfaces the changelog in
 the GitHub UI and on the repo's sidebar.
 
 ```bash
-cd /home/colin/tibread/dist
+cd /path/to/tibread/dist
 
 gh release create v0.1.0 \
     --title "tibread 0.1.0 — first release" \
@@ -76,7 +76,7 @@ gh release create v0.1.0 \
 quick find-and-replace:
 
 ```bash
-cd /home/colin/tibread/dist
+cd /path/to/tibread/dist
 sed -i "s|github.com/yourname/tibread|github.com/<user>/tibread|g" \
     pyproject.toml CHANGELOG.md README.md
 git add pyproject.toml CHANGELOG.md README.md
@@ -87,7 +87,7 @@ git push
 ## What is NOT in the repo (and shouldn't be)
 
 The `.tib` test files used to validate this release are **the user's own
-backup data** and live at `/mnt/e/`, not inside `/home/colin/tibread/dist/`.
+backup data** and live at `/path/to/`, not inside `/path/to/tibread/`.
 They are excluded from version control by virtue of being outside the
 repo tree, and the `.gitignore` further excludes the generated `*.idx`
 sidecars in case anyone copies a `.tib` into the repo for testing.

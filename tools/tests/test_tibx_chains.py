@@ -1,7 +1,7 @@
 """Integration tests for the .tibx slice / chain enumerator.
 
 These exercises run end-to-end against the reference archive
-``Jmicron 0102.tibx`` (a 54 GiB Acronis archive3 v8 file).  They cover:
+``example.tibx`` (a 54 GiB Acronis archive3 v8 file).  They cover:
 
 * :func:`tibread.tibx.chains.enumerate_slices` — decodes the L-SB
   mem-tree at TLV[5] and (when populated) the on-disk ctrees, returning
@@ -49,7 +49,7 @@ from tibread.tibx.chains import (  # noqa: E402
 )
 
 
-DEFAULT_FIXTURE = "/mnt/e/Jmicron 0102.tibx"
+DEFAULT_FIXTURE = "/path/to/example.tibx"
 FIXTURE = os.environ.get("TIBREAD_TIBX_FIXTURE", DEFAULT_FIXTURE)
 
 
@@ -127,7 +127,7 @@ class ParseSliceRecordTests(unittest.TestCase):
     f"reference archive not available at {FIXTURE}",
 )
 class TibxChainsFixtureTests(unittest.TestCase):
-    """Empirical tests against the reference ``Jmicron 0102.tibx`` archive.
+    """Empirical tests against the reference ``example.tibx`` archive.
 
     Empirically (verified by walking TLV[5]'s mem-tree directly) this
     archive holds **one alive slice** (``slice_id=2``, INC) plus a
@@ -168,12 +168,12 @@ class TibxChainsFixtureTests(unittest.TestCase):
                 self.assertGreaterEqual(s.mtime, s.ctime)
                 self.assertLess(s.mtime, hi)
 
-    def test_jmicron_fixture_specifics(self) -> None:
+    def test_example_fixture_specifics(self) -> None:
         """Pin down the empirical ground truth for the reference archive."""
         # We know slice_id=2 is in the mem-tree.
         sids = {s.slice_id for s in self.slices}
         self.assertIn(2, sids)
-        # The Jmicron 0102 archive has its slice timestamps in Feb 2023.
+        # The example archive has its slice timestamps in Feb 2023.
         feb_2023 = int(
             dt.datetime(2023, 2, 1, tzinfo=dt.timezone.utc).timestamp() * 1000
         )

@@ -1,7 +1,7 @@
-# RESEARCH_TIBX_STRUCTURE — Empirical Bytes-Up Analysis of `Jmicron 0102.tibx`
+# RESEARCH_TIBX_STRUCTURE — Empirical Bytes-Up Analysis of `example.tibx`
 
 Date: 2026-04-30
-File: `/mnt/e/Jmicron 0102.tibx`  ·  Size: 54,671,892,480 bytes (≈51 GB)  ·  Pages: 13,347,630 of 4 KB each (file size is exactly a multiple of 4096)
+File: `/path/to/example.tibx`  ·  Size: 54,671,892,480 bytes (≈51 GB)  ·  Pages: 13,347,630 of 4 KB each (file size is exactly a multiple of 4096)
 Method: pure byte inspection (no Ghidra, no DLL execution); cross-referenced against `archive3.dll` strings recon.
 
 ---
@@ -56,7 +56,7 @@ Decoded fields:
 Plain ASCII strings appear:
 ```
 "disk"
-"6A62EFA4-5A66-4CC2-AF2B-C0B18259EA1E"   ← disk GUID (the JMicron-attached drive)
+"6A62EFA4-5A66-4CC2-AF2B-C0B18259EA1E"   ← disk GUID (the Example-attached drive)
 "STRIDER-WIN63"                          ← source machine hostname
 "ACPHO 27.3.1.40173 Win"                 ← Acronis Photo? agent build
 "F3BB912A-0DB8-4004-96AE-FDE5DDEF27EC"   ← machine/install GUID
@@ -104,7 +104,7 @@ So the **last page of the file is the LSM root pointer / catalog**. From its poi
 
 ## 3. Magic-Byte Hunt
 
-A scanner (`/home/colin/tibread/dist/tools/scan_tibx.py`) walks the file in 64 MB chunks with a 64-byte overlap and counts every occurrence of each magic.
+A scanner (`/path/to/tibread/tools/scan_tibx.py`) walks the file in 64 MB chunks with a 64-byte overlap and counts every occurrence of each magic.
 
 ### 3.1 SQLite header `"SQLite format 3\x00"`
 
@@ -257,7 +257,7 @@ To extract a logical disk byte:
 4. Read that page; parse 28-byte SG header (offsets +8..+0x2C) to get `len`, `zlen`, `comp`, `key` — all **big-endian**.
 5. Read `zlen` bytes from the Zstd frame: start at +0x2C of the SG page, then for each subsequent type-`0xff` page concatenate `page[8:]` (i.e. strip its 8-byte envelope) until `zlen` bytes have been collected. Stop early if a non-`0xff` page or another `SG\x00\x01` magic is encountered (indicates frame already terminated).
 6. Decompress with Zstd → exactly `len` bytes of plaintext disk content.
-7. (If `key != 0`) decrypt with the corresponding AES key/IV. **In this archive `key == 0` for every sampled segment, so step 7 is a no-op for `Jmicron 0102.tibx`.**
+7. (If `key != 0`) decrypt with the corresponding AES key/IV. **In this archive `key == 0` for every sampled segment, so step 7 is a no-op for `example.tibx`.**
 
 This pipeline was demonstrated end-to-end on four sampled segments (pages 6, 42, 45, 53). All four decompressed to the expected uncompressed length and yielded recognisable disk content (MBR boot sector, PE/EXE images, NTFS metadata).
 
@@ -276,6 +276,6 @@ This pipeline was demonstrated end-to-end on four sampled segments (pages 6, 42,
 
 ## 8. Artefacts
 
-- Scanner: `/home/colin/tibread/dist/tools/scan_tibx.py`
-- Full-file magic report (JSON): `/home/colin/tibread/dist/tools/scan_tibx_report.json`
+- Scanner: `/path/to/tibread/tools/scan_tibx.py`
+- Full-file magic report (JSON): `/path/to/tibread/tools/scan_tibx_report.json`
 - Tail-1MB dump for offline inspection: `/tmp/tibx_tail1m.bin`

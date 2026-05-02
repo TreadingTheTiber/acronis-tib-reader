@@ -1,6 +1,6 @@
 """End-to-end extraction sanity test."""
 import sys, os, random
-sys.path.insert(0, '/home/colin/tibread/dist')
+sys.path.insert(0, '/path/to/tibread/dist')
 from tibread import open_tib
 
 # Magic-byte signature checks. Returns (status, label) where status is "ok",
@@ -161,14 +161,14 @@ def run(tib_path: str, sample: int | None = None, label: str = ""):
     return tested, ok, zero, garbage
 
 if __name__ == "__main__":
-    target = sys.argv[1] if len(sys.argv) > 1 else "miner1"
-    if target == "miner1":
-        run("/mnt/e/miner1_default_full_b1_s1_v1.tib", sample=None, label="miner1 (full walk)")
+    target = sys.argv[1] if len(sys.argv) > 1 else "example"
+    if target == "example":
+        run("/path/to/legacy_example.tib", sample=None, label="example (full walk)")
     elif target == "storage":
-        run("/mnt/e/STORAGE (R)_full_b1_s1_v1.tib", sample=50, label="STORAGE (50-file sample)")
+        run("/path/to/example_full_b1_s1_v1.tib", sample=50, label="STORAGE (50-file sample)")
     elif target == "storage-big":
-        run("/mnt/e/STORAGE (R)_full_b1_s1_v1.tib", sample=500, label="STORAGE (500-file sample)")
+        run("/path/to/example_full_b1_s1_v1.tib", sample=500, label="STORAGE (500-file sample)")
     elif target == "both":
-        run("/mnt/e/miner1_default_full_b1_s1_v1.tib", sample=None, label="miner1 (full walk)")
+        run("/path/to/legacy_example.tib", sample=None, label="example (full walk)")
         print()
-        run("/mnt/e/STORAGE (R)_full_b1_s1_v1.tib", sample=50, label="STORAGE (50-file sample)")
+        run("/path/to/example_full_b1_s1_v1.tib", sample=50, label="STORAGE (50-file sample)")

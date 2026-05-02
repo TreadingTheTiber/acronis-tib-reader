@@ -30,7 +30,7 @@ from tibread.tibx import (  # noqa: E402
 
 
 # Reference archive path.  Override with TIBREAD_TIBX_FIXTURE if needed.
-DEFAULT_FIXTURE = "/mnt/e/Jmicron 0102.tibx"
+DEFAULT_FIXTURE = "/path/to/example.tibx"
 FIXTURE = os.environ.get("TIBREAD_TIBX_FIXTURE", DEFAULT_FIXTURE)
 
 
@@ -84,7 +84,7 @@ class TibxDiskAdapterTests(unittest.TestCase):
         """``partition_size`` is non-trivial and at least the bootstrap span."""
         with TibxDiskAdapter(FIXTURE) as a:
             size = a.partition_size
-        # The reference archive is a ~167 GiB JMicron disk; we only
+        # The reference archive is a ~167 GiB Example disk; we only
         # assert that the reported size is plausibly disk-scale.
         self.assertGreater(size, BOOTSTRAP_LEN)
         self.assertGreater(size, 1 << 30)  # > 1 GiB

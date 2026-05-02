@@ -3,7 +3,7 @@
 The pure-Python tests exercise the value-decoder and the SGIX cache
 file format and don't need the reference archive.
 
-The fixture-bound tests run against ``Jmicron 0102.tibx`` and verify:
+The fixture-bound tests run against ``example.tibx`` and verify:
 
 * :func:`load_seg_index` produces the expected ~263 k entries;
 * every entry's ``page_offset`` actually points at an SG header in the
@@ -41,7 +41,7 @@ from tibread.tibx.segment_map import (  # noqa: E402
 from tibread.tibx.segment import parse_sg_header  # noqa: E402
 
 
-DEFAULT_FIXTURE = "/mnt/e/Jmicron 0102.tibx"
+DEFAULT_FIXTURE = "/path/to/example.tibx"
 FIXTURE = os.environ.get("TIBREAD_TIBX_FIXTURE", DEFAULT_FIXTURE)
 
 
@@ -127,7 +127,7 @@ class SegmentMapFixtureTests(unittest.TestCase):
         cls.reader.close()
 
     def test_index_has_expected_entry_count(self) -> None:
-        # The Jmicron archive carries 263 063 SG segments.
+        # The example archive carries 263 063 SG segments.
         self.assertEqual(len(self.index), 263063)
 
     def test_seg_id_4_is_bootstrap_segment(self) -> None:
@@ -161,7 +161,7 @@ class SegmentMapFixtureTests(unittest.TestCase):
 
     def test_load_seg_index_cache_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            cache_path = os.path.join(td, "Jmicron.segidx")
+            cache_path = os.path.join(td, "example.segidx")
             # First call: builds + writes cache.
             idx1 = load_seg_index(self.reader, cache_path=cache_path)
             self.assertTrue(os.path.exists(cache_path))

@@ -11,7 +11,7 @@ full random-access disk-image reads.
   fixed chunk size.
 * The mapping `source_byte_offset -> (segment_id, offset_in_segment)`
   lives in the **`segment_map` LSM tree** (L-SB index 2 in
-  `Jmicron 0102.tibx`, root page 13,347,532, ~417 pages).
+  `example.tibx`, root page 13,347,532, ~417 pages).
 * The segment_map LSM tree's leaf-cell decoder is **not yet
   implemented**.  See `tibread/tibx/lsm.py` — `parse_leaf` returns
   the raw cell bytes; the Acronis Golomb / LZ4 codec from
@@ -27,7 +27,7 @@ full random-access disk-image reads.
 ## Refuting the "segment 3 is a u16 chunk-id index" hypothesis
 
 An earlier exploratory pass observed that the 4th SG segment in
-`Jmicron 0102.tibx` (the 139,264-byte segment at page 9) decompresses
+`example.tibx` (the 139,264-byte segment at page 9) decompresses
 to bytes that *start* with the `u16` little-endian sequence
 `0001 0002 0003 0004 ...`, and proposed that it was a flat
 `u16[chunk_id] -> segment_id` index.  Closer inspection refutes this:
@@ -49,7 +49,7 @@ happens to look ordered.
 ## What the segment_map LSM tree contains
 
 Per `tibread/tibx/lsm.py` and observed L-SB superblocks in
-`Jmicron 0102.tibx`:
+`example.tibx`:
 
 | L-SB # | sb_size | root_page  | name (inferred)         | size       |
 |--------|---------|------------|--------------------------|-----------|
@@ -140,7 +140,7 @@ To finish this work, the missing pieces are (in order):
    codec from `archive3.dll: lsm_decompress_leaf` (or re-derive it
    from `lsm_golomb.c` strings).
 2. **Walk the `segment_map` LSM tree** from its root page (13,347,532
-   for `Jmicron 0102.tibx`).  Each leaf cell will yield a
+   for `example.tibx`).  Each leaf cell will yield a
    `(key, value)` pair where `key` likely encodes either a
    source-byte offset or a segment_id, and `value` encodes the
    target.

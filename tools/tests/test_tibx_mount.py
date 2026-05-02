@@ -40,7 +40,7 @@ from tibread import cli  # noqa: E402
 from tibread.mount import fuse as mount_fuse  # noqa: E402
 
 
-DEFAULT_FIXTURE = "/mnt/e/Jmicron 0102.tibx"
+DEFAULT_FIXTURE = "/path/to/example.tibx"
 FIXTURE = os.environ.get("TIBREAD_TIBX_FIXTURE", DEFAULT_FIXTURE)
 
 

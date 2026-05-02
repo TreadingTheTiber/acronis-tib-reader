@@ -6,7 +6,7 @@ as folklore and to motivate the format choices in `FORMAT.md`.
 ## Why this was needed
 
 The original task was recovering a 1 TB Acronis True Image sector backup
-(`STORAGE (R)_full_b1_s1_v1.tib`) from a long-discontinued Acronis
+(`example_full_b1_s1_v1.tib`) from a long-discontinued Acronis
 installation. No publicly-available tool could read it. We had:
 - The 1 TB `.tib` file
 - The Acronis True Image binary (`product.bin`, 37.6 MB stripped i386 ELF)
@@ -26,7 +26,7 @@ gaps between anchors meant files in unanchored regions read garbage.
 ## Phase 2: Ghidra MCP setup
 
 To go higher than 55% required understanding what Acronis was actually doing.
-We installed Ghidra on a separate Linux box (`strider`) and stood up
+We installed Ghidra on a separate Linux box (`re-host`) and stood up
 `bethington/ghidra-mcp` so an LLM agent could decompile, xref, and rename
 functions over MCP. ~165 tools exposed.
 
@@ -112,7 +112,7 @@ yielded a categorized map; subsequent focused agents decoded:
 | Metadata blob TLV | Ghidra | Agents O/U: 87 records, 62 distinct tags |
 
 Plus several PARTIAL or NEGATIVE findings — see the full per-agent writeups
-under `/home/colin/tibread/*.md` in the original development tree.
+under `/path/to/tibread/*.md` in the original development tree.
 
 ## Lessons learned
 

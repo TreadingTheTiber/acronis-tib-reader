@@ -225,7 +225,7 @@ def decompress_segment(
     for encrypted segments (``seg.key != 0``) or unknown compression
     variants — the format spec implies AES wrapping is *inside* the SG
     record, but no encrypted segment has been observed in the test
-    archive (``Jmicron 0102.tibx`` is plaintext throughout).
+    archive (``example.tibx`` is plaintext throughout).
     """
     if seg.key != 0:
         raise NotImplementedError(

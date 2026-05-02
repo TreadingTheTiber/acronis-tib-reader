@@ -73,7 +73,7 @@ items are listed below as deferred.
 The single integration test (`tools/tests/test_compression.py`) covers
 LZNT1 + WOF read paths against synthesised attribute scenarios. The
 end-to-end smoke test (`extract_magic_check.py`) requires real `.tib`
-files at `/mnt/e/...`.
+files at `/path/to/...`.
 
 What's NOT covered by automated tests:
 
@@ -103,7 +103,7 @@ What's NOT covered by automated tests:
 ## Smoke test results (post-fix)
 
 - `python3 tools/tests/test_compression.py` — all 7 sub-tests pass.
-- `tib info /mnt/e/miner1_default_full_b1_s1_v1.tib` — see commit log.
+- `tib info /path/to/legacy_example.tib` — see commit log.
 - `tib verify` on both test files — see commit log.
 
 If any of the above fails after a fix lands, revert the corresponding row.

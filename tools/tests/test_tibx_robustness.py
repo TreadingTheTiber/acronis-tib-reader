@@ -38,7 +38,7 @@ from tibread.tibx.reader import TibxPageCrcError  # noqa: E402
 
 
 _REF_ARCHIVE = os.environ.get(
-    "TIBREAD_TIBX_FIXTURE", "/mnt/e/Jmicron 0102.tibx"
+    "TIBREAD_TIBX_FIXTURE", "/path/to/example.tibx"
 )
 
 
@@ -174,7 +174,7 @@ class CorruptedPagesAreCaught(unittest.TestCase):
     f"reference archive not available at {_REF_ARCHIVE}",
 )
 class CompressionVariantCoverage(unittest.TestCase):
-    """The reference archive ``Jmicron 0102.tibx`` carries (at least) one
+    """The reference archive ``example.tibx`` carries (at least) one
     segment of each known Zstd preset (``0x0300``, ``0x0301``, ``0x0302``,
     ``0x0303``).  This test pins the constant table down by decompressing
     a representative segment of each variant.  Regressions that drop a

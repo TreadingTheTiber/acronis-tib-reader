@@ -1,6 +1,6 @@
 # RESEARCH: `.tibx` LSM-tree Index — Page Layout
 
-Source archive used for empirical decode: `/mnt/e/Jmicron 0102.tibx`
+Source archive used for empirical decode: `/path/to/example.tibx`
 (54 GiB, 13,347,630 pages, ATI 2024-format archive3).
 
 Confidence convention:
@@ -60,7 +60,7 @@ Both `0x03` LEAF and `0x04` LDIR pages share the same body layout:
 +0x35..        encoded cell stream (continues to body[4088])
 ```
 
-**Encoding-byte distribution in `Jmicron 0102.tibx`** (page-type → encoding):
+**Encoding-byte distribution in `example.tibx`** (page-type → encoding):
 
 | Page type | Encoding | Count |
 |-----------|---------:|------:|
@@ -102,7 +102,7 @@ in Ghidra and read the actual algorithm.
 
 The latest `ARCH` page body carries an **inline array of `L-SB`
 (LSM superblock) records**, each prefixed by a 4-byte BE u32
-``sb_size``.  In `Jmicron 0102.tibx` the latest ARCH lives at page
+``sb_size``.  In `example.tibx` the latest ARCH lives at page
 **13,347,627** (commit_seq 3229).
 
 ### L-SB record layout **[CONFIRMED]**
@@ -127,7 +127,7 @@ which is why the parser in `lsm.py` uses a *structural* decoder
 (scan ctree slots until they stop looking like plausible
 `(file_offset, byte_size)` pairs) rather than relying on a count field.
 
-### The 7 superblocks in `Jmicron 0102.tibx`
+### The 7 superblocks in `example.tibx`
 
 | #  | sb_size | ver_block    | seq  | root page  | tree_sz_bytes | inferred role        | confidence |
 |---:|--------:|--------------|-----:|-----------:|--------------:|----------------------|------------|
@@ -168,7 +168,7 @@ per LEAF.  This is enough to confirm tree size end-to-end:
 from tibread.tibx import TibxReader
 from tibread.tibx.lsm import read_lsm_superblocks, walk_lsm_tree
 
-with TibxReader("/mnt/e/Jmicron 0102.tibx") as r:
+with TibxReader("/path/to/example.tibx") as r:
     sbs = read_lsm_superblocks(r)
     target = sbs[1]              # data_map (biggest tree)
     n = 0

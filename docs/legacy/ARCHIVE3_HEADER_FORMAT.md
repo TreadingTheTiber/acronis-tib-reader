@@ -37,7 +37,7 @@ but observed empty in healthy archives).
 | `0x3000`    | …         | header pages / data pages alternating      | inferred   |
 | (chain)     |           | tail of file: latest CI page (scanned bwd) | confirmed  |
 
-Test file `Jmicron 0102.tibx` (54 GB, ctime 2023-02-12):
+Test file `example.tibx` (54 GB, ctime 2023-02-12):
 
 ```
 0x0000: 41 01 00 00  2e 0b 0a 51  41 52 43 48  00 00 12 38   A....\v.QARCH..8
@@ -338,7 +338,7 @@ names for the next agent who can update them via the Ghidra GUI or a fixed MCP:
 | 0x180039df0  | `archive_init_volume_reader`            | Volume size probe + state init           |
 | 0x180039f10  | `archive_read_tail_chunk`               | Read & buffer up to N tail pages         |
 
-## Cross-reference with the test file `Jmicron 0102.tibx`
+## Cross-reference with the test file `example.tibx`
 
 - File size: 54,671,892,480 bytes ≈ 50.91 GiB. `[confirmed: ls -l]`
 - Page 0 (`0x0000`):
@@ -393,7 +393,7 @@ names for the next agent who can update them via the Ghidra GUI or a fixed MCP:
 - CI body magic (`DAT_1800aa7b4`) byte value not extracted via MCP — the
   endpoints `/get_data_at_address`, `/get_bytes`, `/list_data` either 404 or
   don't accept the address range. Suggest pulling raw bytes from the DLL on
-  strider directly.
+  re-host directly.
 - The page-type value in page-magic byte 0 (= `0x41`) is consistent across
   pages — it's the high byte (the "page kind") that varies (`0x01`, `0x02`).
   Whether `ar_page_verify` checks the literal `0x41` as a magic byte vs.

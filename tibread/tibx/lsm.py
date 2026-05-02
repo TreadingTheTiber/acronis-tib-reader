@@ -16,7 +16,7 @@ Two on-disk constructs are decoded here:
 
 The byte layouts implemented here are documented in
 ``docs/legacy/ARCHIVE3_LSM_SUPERBLOCK.md``. Confirmed against
-``Jmicron 0102.tibx`` (header_version=8, hdr_size=0x1540, 13 347 630
+``example.tibx`` (header_version=8, hdr_size=0x1540, 13 347 630
 pages).
 
 What works today

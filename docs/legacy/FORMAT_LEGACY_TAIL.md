@@ -5,7 +5,7 @@ describes the bytes between **the end of the block stream** (= end of inline
 metadata #2's zlib payload) and **the start of the structured trailer**
 (`[u32 size][u32 magic 0x94E18A2B]` framing the 37-byte TLV trailer body).
 
-Empirically derived from `/mnt/e/miner1_default_full_b1_s1_v1.tib`.
+Empirically derived from `/path/to/legacy_example.tib`.
 
 > **TL;DR**: The "AES-ECB-on-uniform-plaintext ciphertext" region the block-walk
 > agent identified is **NOT encrypted**. It is the legacy MD5 dedup manifest,
@@ -17,7 +17,7 @@ Empirically derived from `/mnt/e/miner1_default_full_b1_s1_v1.tib`.
 
 ---
 
-## File-offset map (miner1)
+## File-offset map (example)
 
 ```
 +-------------------------------------+ off 8,773,374,742
@@ -71,7 +71,7 @@ The post-block-stream tail (3,107,417 bytes) decomposes into two regions:
 
 **Identical purpose** to the modern format's 37 MB MD5 dedup manifest.
 
-| Property | Legacy (TI 2014, miner1) | Modern (TI 2018+, agent C's 1 TB STORAGE.tib) |
+| Property | Legacy (TI 2014, example) | Modern (TI 2018+, agent C's 1 TB STORAGE.tib) |
 |---|---|---|
 | Manifest size | 1,129,744 B (1.08 MB) | 37,157,840 B (37 MB) |
 | Entry size | 16 B (MD5 digest) | 16 B (MD5 digest) |
@@ -122,7 +122,7 @@ table) is unambiguous**.
 
 ### Why blocks 0..99 are excluded
 
-Inline metadata record #1 (at offset 10,431,214 in miner1) decompresses to
+Inline metadata record #1 (at offset 10,431,214 in example) decompresses to
 1,620 bytes = `20 + 100 * 16`. That layout is identical to a 20-byte chunk
 header followed by 100 x 16-byte MD5 digests. Per `FORMAT_LEGACY_BLOCKS.md`,
 this is "Stream 1 / per-block dedup tracking metadata" for the first 100
@@ -280,17 +280,17 @@ the same MD5 dedup-manifest substrate, with format-specific extensions on top
 
 ## Tools
 
-- `/home/colin/tibread/decode_legacy_tail.py` -- analyser/dumper.
+- `/path/to/tibread/decode_legacy_tail.py` -- analyser/dumper.
   - `python3 decode_legacy_tail.py map` -- print structural map.
   - `python3 decode_legacy_tail.py verify [N]` -- sample-verify N block hashes
     against the manifest (default 200).
   - `python3 decode_legacy_tail.py dump <manifest.bin> <residual.bin>` --
     extract the two regions to separate files.
 
-## Key constants (miner1)
+## Key constants (example)
 
 ```
-TIB file:                /mnt/e/miner1_default_full_b1_s1_v1.tib
+TIB file:                /path/to/legacy_example.tib
 file size:               8,776,798,720
 block stream end:        8,773,374,742  (start of inline #2 TLV)
 inline #2 zlib end:      8,773,691,096  (== TAIL_START)

@@ -221,7 +221,7 @@ without mutation must either:
 ## Era identification
 
 The modern format = TI 2018 (build 17750+ ≈ v23.5).
-The legacy format = TI 2014 (build ~16500), confirmed via miner1's
+The legacy format = TI 2014 (build ~16500), confirmed via example's
 embedded XML metainfo `<productinfo name="True Image"><version major="16"
 minor="0"/><build number="6514"/></productinfo>`.
 

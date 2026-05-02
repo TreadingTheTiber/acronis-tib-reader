@@ -9,7 +9,7 @@ length is `BLOB_END - metaDataOffset` where BLOB_END = (file_size - 104) - 41
 in this build (sector_magic at file_size-104; trailer body 41 bytes ending
 just before the magic word).
 
-For STORAGE (R)_full_b1_s1_v1.tib this gives a 864-byte blob (the
+For example_full_b1_s1_v1.tib this gives a 864-byte blob (the
 "780-byte" figure in the original CLAUDE.md was rounded; actual length is 864).
 
 Format (reverse-engineered from product.bin, see findings below):
@@ -34,7 +34,7 @@ Format (reverse-engineered from product.bin, see findings below):
                                          offset in concat coords; S = total
                                          chunk-map region size.
 
-Verified anchors in this blob (file: STORAGE (R)_full_b1_s1_v1.tib):
+Verified anchors in this blob (file: example_full_b1_s1_v1.tib):
 
     blob offset    interpretation
     ------------   -------------------------------------------
@@ -64,7 +64,7 @@ Verified anchors in this blob (file: STORAGE (R)_full_b1_s1_v1.tib):
     0x12D..0x14C   disk-2 framing + 14-byte START marker (mirrors 0x0B4)
     0x14D..0x1BF   SECOND source-disk record (parallel structure to first)
     0x1C0..0x1E6   COMPUTER record: tags 2e/69, a1, a6, a8 (computer GUID),
-                   a9 (LDM disk-group name "GARY-PC-Dg1")
+                   a9 (LDM disk-group name "EXAMPLE-PC-Dg")
     0x1ED..0x1F9   13-byte CHUNK-MAP LOCATOR (agent A's signature)
     0x1FA..0x29F   PIT/SLICE record: many small tags (1f, 20, 23, 28, 2f,
                    3c, 45, 46, 47, 5b, 5d, 5e, 66) -- archive/PIT params
@@ -124,7 +124,7 @@ some confirmed via Ghidra cross-reference):
     0x00A8 16      computer GUID (matches 'computer_id' from stream-4 XML;
                    this is one of the LDM-stream GUIDs:
                    ff f3 a0 ca c8 58 e9 11 a8 52 00 05 5d 52 f3 fd)
-    0x00A9 12      LDM disk-group name (Pascal-string: 0x0b "GARY-PC-Dg1")
+    0x00A9 12      LDM disk-group name (Pascal-string: 0x0b "EXAMPLE-PC-Dg")
     0x0073 1       (0x01 = ?)
     0x0006 V       chunk-map-locator marker (start of 13-byte signature)
                    payload = 6-byte V LE (chunk-map offset in concat coords)

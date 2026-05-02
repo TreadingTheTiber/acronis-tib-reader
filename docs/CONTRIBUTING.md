@@ -134,7 +134,7 @@ python -m tibread.cli verify /path/to/storage_full_b1_s1_v1.tib
 python -m tibread.cli ls    /path/to/storage_full_b1_s1_v1.tib | head
 
 # Legacy format (slow first open)
-python -m tibread.cli info  /path/to/miner1_default_full_b1_s1_v1.tib
+python -m tibread.cli info  /path/to/legacy_example.tib
 
 # Programmatic
 python -c "from tibread import open_tib; v=open_tib('...'); print(v.list_dir(''))"
@@ -152,7 +152,7 @@ Most of the on-disk format was derived by decompiling Acronis True Image's
 
 If you're picking up where a previous agent left off, the relevant
 project file is the one shared across the swarm; ask the maintainer.
-The "strider" workflow notes (which Ghidra MCP setup, how to spawn a
+The "re-host" workflow notes (which Ghidra MCP setup, how to spawn a
 fresh agent against a function address, etc.) live in `CLAUDE.md` at the
 repo root.
 

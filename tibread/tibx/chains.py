@@ -20,7 +20,7 @@ This module provides a small high-level API on top of
 Slice record byte layout (TLV[5] LSM value, 132 bytes effective).
 Source: ``ar_slice_from_disk @ 0x18002da80`` in ``archive3.dll``
 (decompiled, plus empirical confirmation against
-``Jmicron 0102.tibx``)::
+``example.tibx``)::
 
     +0x00  16   slice_uuid                 raw 16 B
     +0x10   8   ts_a                       BE u64  (start time, ms-epoch)
@@ -212,7 +212,7 @@ def _decode_memtree_cells(sb: LsmSuperblock):
     whose decompressed body is the same compact-cell stream used by
     LEAF pages — i.e. ``decode_cells_compact`` reads it directly given
     the tree's ``key_length`` / ``value_length``.  This was confirmed
-    empirically against ``Jmicron 0102.tibx`` (TLV[5] mem-tree decodes
+    empirically against ``example.tibx`` (TLV[5] mem-tree decodes
     cleanly to one alive cell + one tombstone with this scheme).
     """
     payload = sb.memtree_extra_payload

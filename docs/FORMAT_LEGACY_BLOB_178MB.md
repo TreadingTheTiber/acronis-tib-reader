@@ -6,11 +6,11 @@ sub-region (3) -- the only piece marked "AES-encrypted").
 
 This document resolves the apparent contradiction:
 
-> miner1's `productinfo` XML reports `encryption=none`, yet the residual
+> example's `productinfo` XML reports `encryption=none`, yet the residual
 > contains a 1.78 MB blob with the byte-statistical signature of AES-CBC/CTR
 > ciphertext (entropy 7.9999, chi^2 = 237.9, 100% unique 16-byte blocks).
 
-Empirically derived from `/mnt/e/miner1_default_full_b1_s1_v1.tib`
+Empirically derived from `/path/to/legacy_example.tib`
 (8,776,798,720 bytes, TI 2013 build 6514).
 
 > **TL;DR**: the blob really IS encrypted, but it is NOT user-encrypted.
@@ -371,7 +371,7 @@ imager binary key-derivation RE, or a working SDK).
 
 ## Tools
 
-- `/home/colin/tibread/decode_residual_blob.py` -- this analyzer
+- `/path/to/tibread/decode_residual_blob.py` -- this analyzer
   - `--boundary`     fine-grained sliding entropy at start/end
   - `--stats`        full statistical fingerprint at both boundary candidates
   - `--compression`  exhaustive zlib/lzma/bz2/lz4/brotli/snappy decompression sweep
@@ -387,10 +387,10 @@ Prerequisites:
 
 ```
   pip install pycryptodome      # AES brute-force tests
-  python3 decode_legacy_tail.py dump <miner1.tib> /tmp/legacy_residual.bin
+  python3 decode_legacy_tail.py dump <example.tib> /tmp/legacy_residual.bin
 ```
 
-## Key constants (miner1)
+## Key constants (example)
 
 ```
 blob span (clean, 16-aligned):     residual [19,904 .. 1,886,064)

@@ -1,6 +1,6 @@
 # RESEARCH_TIBX_FILE_MAP — full-file magic-byte cartography
 
-Derived from a sequential scan of `/mnt/e/Jmicron 0102.tibx` (54,671,892,480
+Derived from a sequential scan of `/path/to/example.tibx` (54,671,892,480
 bytes ≈ 50.9 GiB) using
 [`tibread.tibx_magic_scanner`](../../tibread/tibx_magic_scanner.py).
 
@@ -200,14 +200,14 @@ the body is unused (only ~58 nonzero bytes in the final ARCI).
 ## Reproducing the scan
 
 ```bash
-cd /home/colin/tibread/dist
-/home/colin/tibread/venv/bin/python -m tibread.tibx_magic_scanner \
-    "/mnt/e/Jmicron 0102.tibx" \
+cd /path/to/tibread/dist
+/path/to/tibread/venv/bin/python -m tibread.tibx_magic_scanner \
+    "/path/to/example.tibx" \
     --save-offsets /tmp/tibx_offsets.json
 ```
 
 The scanner is at
-[`/home/colin/tibread/dist/tibread/tibx_magic_scanner.py`](../../tibread/tibx_magic_scanner.py).
+[`/path/to/tibread/tibread/tibx_magic_scanner.py`](../../tibread/tibx_magic_scanner.py).
 Key features:
 
 - Streams the file in 64 MiB chunks with a small overlap window so magics

@@ -6,7 +6,7 @@ Acronis True Image 2024 `.tibx` reader (`archive3.dll`).
 ## TL;DR
 
 - **Approach:** Option A — `archive3.dll` is loaded into the **same** Ghidra
-  MCP server already running on strider port 8089 alongside `product.bin`.
+  MCP server already running on re-host port 8089 alongside `product.bin`.
   No second instance, no second tunnel.
 - **Endpoint (from WSL):** `http://127.0.0.1:8089/<endpoint>` via the existing
   SSH tunnel.
@@ -17,7 +17,7 @@ Acronis True Image 2024 `.tibx` reader (`archive3.dll`).
 
 ## Why Option A
 
-`~/start_ghidra_mcp.sh` on strider launches one bare-metal headless server
+`~/start_ghidra_mcp.sh` on re-host launches one bare-metal headless server
 (`com.xebyte.headless.GhidraMCPHeadlessServer`) that supports multiple loaded
 programs concurrently and routes calls by the `program` query parameter
 (see `HeadlessProgramProvider.getProgram(name)` in `~/ghidra-mcp/src/...`).
@@ -28,10 +28,10 @@ tunnel, and divergent state. Option A wins on simplicity.
 ## How the program was loaded
 
 ```bash
-# On strider, against the running MCP:
+# On re-host, against the running MCP:
 curl -sS -X POST "http://127.0.0.1:8089/load_program" \
   -H "Content-Type: application/json" \
-  -d '{"file": "/home/colin/archive3_re/archive3.dll"}'
+  -d '{"file": "/path/to/archive3_re/archive3.dll"}'
 # -> {"success": true, "program": "archive3.dll"}
 
 # Then trigger full auto-analysis:
@@ -66,7 +66,7 @@ from 1434 (loader-only) to 2091 (full analysis).
    `/search_functions_enhanced` accept names and return addresses. Most
    archive_* / ar_* exports survived as named symbols (no stripping).
 5. **Both programs share the same MCP, hence the same tunnel.** The WSL
-   tunnel `localhost:8089 -> strider:8089` is already up. Do **not** open
+   tunnel `localhost:8089 -> re-host:8089` is already up. Do **not** open
    port 8090; nothing listens there.
 6. **`compiler=windows`, `language=x86:LE:64:default`** — confirmed x86-64 PE.
    `product.bin` is 32-bit ELF; don't mix function addresses between them.

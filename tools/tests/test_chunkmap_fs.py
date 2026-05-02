@@ -4,7 +4,7 @@ Two layers:
 
 * Predicate / sniff tests run on synthetic minimal byte streams.
 * The end-to-end recovery test runs against the real reference file
-  (`NAS_Backup_full_b26_s1_v1.tib` on a QNAP share) when accessible,
+  (`share_backup_example.tib` on a QNAP share) when accessible,
   capped at 5 files for speed. Skipped on portable / CI machines.
 """
 from __future__ import annotations
@@ -45,7 +45,7 @@ def _build_minimal_fs_tib(tmpdir: str, files: list[bytes]) -> str:
     """Build a minimal FS-mode hybrid .tib containing the given files.
 
     The volume header, footer, and trailer use the layouts decoded from
-    the reference NAS_Backup file. Chunk size is fixed at 256 KiB; if a
+    the reference share_backup file. Chunk size is fixed at 256 KiB; if a
     file is larger it gets split into multiple `m` records.
     """
     CHUNK = 256 * 1024
@@ -217,15 +217,13 @@ class ExtensionSniffTests(unittest.TestCase):
 
 # ---- end-to-end against the real fixture (best-effort) -------------------
 
-REAL_FIXTURE = (
-    "/mnt/isengard/backups_static/Other People Backups/"
-    "2022.11 Dad Backups/astratech-2/NAS_Backup_full_b26_s1_v1.tib"
-)
+REAL_FIXTURE = os.environ.get("TIBREAD_FS_FIXTURE", "")
 
 
 @unittest.skipUnless(
-    os.path.exists(REAL_FIXTURE),
-    "real NAS_Backup fixture not available",
+    REAL_FIXTURE and os.path.exists(REAL_FIXTURE),
+    "real FS-mode fixture not available "
+    "(set TIBREAD_FS_FIXTURE=/path/to/archive.tib to enable)",
 )
 class RealFixtureTests(unittest.TestCase):
     def test_real_fixture_classified_as_hybrid(self) -> None:

@@ -85,7 +85,7 @@ listed where they exist.
 
 ---
 
-## Empirical schema bytes (`Jmicron 0102.tibx`, header_version=8)
+## Empirical schema bytes (`example.tibx`, header_version=8)
 
 | TLV slot | On-disk `key_length` / `value_length` | Confirms |
 |----------|---------------------------------------|----------|
@@ -194,7 +194,7 @@ but their **tree-name claims should be ignored** in favour of this doc.
    archive, but the tree-handle name is just `umap`).
 4. **Round 4 — meta_keys / volume_table agent**:
    Verified TLV[18]=`volume_table` and decoded the `(idx=0, byte_offset=0)`
-   record on whole-disk Jmicron sample. No conflict with the LSM-slot
+   record on whole-disk example sample. No conflict with the LSM-slot
    mapping; this slot does not pass through `lsm_sb_read`.
 
 The recurring root cause across rounds 1–3: each agent took the

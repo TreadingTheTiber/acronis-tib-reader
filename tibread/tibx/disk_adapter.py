@@ -42,7 +42,7 @@ Volume discovery
 ----------------
 
 The ``data_map`` keys identify their stream by an opaque ``volume_id``
-field (in :file:`Jmicron 0102.tibx` the small metadata streams are 2..9,
+field (in :file:`example.tibx` the small metadata streams are 2..9,
 the system-reserved partition is 6, and the main partition is 10).  We
 discover which volume_id corresponds to a given ``partition_offset`` by:
 
@@ -61,10 +61,10 @@ Example
 
 >>> from tibread.tibx import TibxDiskAdapter
 >>> from tibread.ntfs import NtfsVolume
->>> with TibxDiskAdapter("/mnt/e/Jmicron 0102.tibx") as a:
+>>> with TibxDiskAdapter("/path/to/example.tibx") as a:
 ...     parts = a.list_mbr_partitions()
 >>> # Partition 0 = System Reserved, starts 1 MiB into the disk:
->>> with TibxDiskAdapter("/mnt/e/Jmicron 0102.tibx",
+>>> with TibxDiskAdapter("/path/to/example.tibx",
 ...                      partition_offset=parts[0]["byte_offset"]) as pa:
 ...     bpb = pa.read(0, 512)
 ...     vol = NtfsVolume(pa, build_index=False)

@@ -169,13 +169,13 @@ files spanning TI 2013 through TI 2018+.
 
 ### Verified working
 
-- **`STORAGE (R)_full_b1_s1_v1.tib`** — 1.04 TiB, TI v23.5 build 17750
+- **`example_full_b1_s1_v1.tib`** — 1.04 TiB, TI v23.5 build 17750
   (modern era). End-to-end recovery confirmed at ~99% file-count parity vs.
   the source `.xml` metainfo (200,000+ files extracted; remaining failures
   are Recycle-Bin entries with deallocated source clusters and old QuickTime
   `.mov` files with non-`ftyp` headers — genuine source-data issues, not
   reader bugs).
-- **`miner1_default_full_b1_s1_v1.tib`** — 8.18 GiB, TI 2013 era (legacy era,
+- **`legacy_example.tib`** — 8.18 GiB, TI 2013 era (legacy era,
   8-byte preamble, 64-cluster blocks). End-to-end recovery confirmed at 100%
   file-count parity. Inline chunk-map scan completes in ~4 minutes; cached
   re-opens are instant.

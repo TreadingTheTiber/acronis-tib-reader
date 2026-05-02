@@ -93,11 +93,11 @@ on the original physical disk including pre-MBR / inter-partition gaps).
 HybridChunkMap has a similar 20-byte layout but uses tag `0xDF` (vs
 `0xC7`) to gate the trailing 8 bytes — different name, same role.
 
-## Empirical sighting in miner1
+## Empirical sighting in example
 
-Miner1 is a **per-volume legacy** archive, NOT a whole-disk-image. So
-miner1's main stream is `SequentialImageStream` + (inline)
-`SequentialChunkMap`. **However**, miner1's trailing metadata blob
+Example is a **per-volume legacy** archive, NOT a whole-disk-image. So
+example's main stream is `SequentialImageStream` + (inline)
+`SequentialChunkMap`. **However**, example's trailing metadata blob
 (at file offset `0x20b234d98`, 921 bytes) does contain a 1-record
 DiskChunkMap-style descriptor in its first ZLIB-compressed sub-region:
 
@@ -153,20 +153,20 @@ Other callers of DiskChunkMap:
 | 20-byte records, 12B significant + optional 8B extra | **Decompiled** (FUN_08983090) |
 | Tag set: 2, 4, 6, 0xC7, 99 | **Decompiled** (FUN_08983090) |
 | Tag 0xC7 (=199) gates the trailing 8 bytes per record | **Decompiled** (FUN_08983090 condition `cVar5 != '\0'`) |
-| Records zlib-compressed with same `ZLibDecompressor` | **Decompiled** + miner1 empirical (the embedded 21-byte zlib in miner1's trailing metadata blob inflates cleanly) |
+| Records zlib-compressed with same `ZLibDecompressor` | **Decompiled** + example empirical (the embedded 21-byte zlib in example's trailing metadata blob inflates cleanly) |
 | Constructor chain: OpenHardDiskImage → DiskImageStream → DiskChunkMap | **Decompiled** (xrefs from FUN_08983090 → FUN_08ad2ad0 → FUN_08ad64e0) |
 | RemovePoints::Create enum: 0=Seq, 1=Hyb, 2=Disk | **Decompiled** (FUN_08ad1290 lines 511..554) |
-| One DiskChunkMap-style record sits in miner1's trailing metadata blob | **Empirical** (decoded byte-by-byte) |
+| One DiskChunkMap-style record sits in example's trailing metadata blob | **Empirical** (decoded byte-by-byte) |
 
 ## Open question
 
-The miner1 trailing-blob 1-record DiskChunkMap is unusual: miner1 is a
+The example trailing-blob 1-record DiskChunkMap is unusual: example is a
 per-volume legacy archive (no MBR, no whole-disk semantics), yet has a
 DiskChunkMap descriptor in its trailing metadata. The semantics here are
 **probably "last block bookmark"** — a single record pointing at the
 file offset where the last compressed block lives, used by the archive
 verifier to confirm the block stream terminates cleanly. The `extra`
-field is zero in miner1, supporting "this is bookmark, not LBA mapping".
+field is zero in example, supporting "this is bookmark, not LBA mapping".
 
 A more authoritative answer would require finding a real whole-disk-image
 .tib (Acronis True Image with a "Disk" backup target rather than

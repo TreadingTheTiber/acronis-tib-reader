@@ -1,9 +1,9 @@
 # STRESS_TEST_RESULTS — `.tibx` Reader, Final QC Pass
 
 Date: 2026-04-30
-Reference archive: `/mnt/e/Jmicron 0102.tibx` (54,671,892,480 bytes ≈ 51 GiB, 13,347,630 pages of 4 KiB).
+Reference archive: `/path/to/example.tibx` (54,671,892,480 bytes ≈ 51 GiB, 13,347,630 pages of 4 KiB).
 Host: WSL2, archive on `/mnt/e` 9p mount (DrvFs, msize=65536).
-Python: `/home/colin/tibread/venv/bin/python` (3.12.3).
+Python: `/path/to/tibread/venv/bin/python` (3.12.3).
 Acceleration: `crc32c` C extension installed; `zstandard` 0.25.0.
 
 This is the final-QC stress-test report for the read-only `.tibx`

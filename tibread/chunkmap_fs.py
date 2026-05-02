@@ -3,7 +3,7 @@ chunkmap_fs.py — walker for the FS-mode hybrid `.tib` variant.
 
 This is the layout produced by Acronis True Image when backing up a
 file share rather than a block device. We've seen one specimen in the
-wild (`NAS_Backup_full_b26_s1_v1.tib`, TI 2016). The volume header is
+wild (`share_backup_example.tib`, TI 2016). The volume header is
 byte-shape-identical to sector-mode (magic ``0xA2B924CE``) but the
 trailer magic is ``0x94E18A2C`` (FS-mode sentinel) and the body is a
 generic block-store stream of three record types:
@@ -47,7 +47,7 @@ Limitations
   we currently halt at. Files are emitted as ``recovered_NNNNNN.<ext>``
   with the extension sniffed from content magic.
 * This walker has only been validated against the single
-  ``NAS_Backup_full_b26_s1_v1.tib`` sample. Other share-mode .tib
+  ``share_backup_example.tib`` sample. Other share-mode .tib
   files may use additional record types we haven't seen, and v2 of
   the FS-mode format (TI 2018+) uses a flat ``u64`` cursor stride
   instead of the v1 ``(u32 index, u8[16] md5)`` chained MD5 model.
@@ -61,8 +61,8 @@ References
   copy, ``FUN_0853b380`` cursor init).
 * Empirical sample-dissection of the three f-batches at file offsets
   0x163b8f6 (20 streams), 0x43353b0 (12 streams), 0x589e506 (9 streams)
-  in the reference NAS_Backup file.
-* See also ``/home/colin/tibread/FILESYSTEM_MODE_TIB.md`` (RE Agent K,
+  in the reference share_backup file.
+* See also ``/path/to/tibread/FILESYSTEM_MODE_TIB.md`` (RE Agent K,
   2026-04-30) for the higher-level iterator / vtable layout.
 """
 from __future__ import annotations
@@ -325,7 +325,7 @@ def _consume_zlib(f, max_extra: int = 16 << 20) -> Tuple[int, bytes]:
 
     Note on intermittent off-by-1 results
     -------------------------------------
-    Some `m`-record chunks in the reference NAS_Backup archive (5 out of
+    Some `m`-record chunks in the reference share_backup archive (5 out of
     ~100 sampled files) inflate to **exactly 1 byte less** than the
     corresponding metadata's expected size. Investigation (RE Agent 3,
     2026-05-01) confirmed these are not parser bugs: the on-disk
@@ -568,7 +568,7 @@ def extract_files(tib_path: str, output_dir: str, *,
     # match in stream order. This gives correct pairings as long as no
     # two files in the archive share both size AND a position-ambiguous
     # alphabetical neighbourhood — in practice this is essentially
-    # always true for share/NAS backups (NAS_Backup: 153,874 files,
+    # always true for share/NAS backups (share_backup: 153,874 files,
     # all paired).
     file_records_by_size: dict = {}    # int -> list[FsDirRecord]
     file_records_total = 0
@@ -748,7 +748,7 @@ def extract_files(tib_path: str, output_dir: str, *,
 # region is **plaintext** (was thought encrypted; isn't): a chain of
 # raw-deflate streams ending with a self-locating 16-byte tail.
 #
-# Layout (verified empirically against `NAS_Backup_full_b26_s1_v1.tib`):
+# Layout (verified empirically against `share_backup_example.tib`):
 #
 #   [last m/n record's zlib end]
 #   [f-batch: N×(44 B preamble + raw-deflate metadata blob)]
@@ -888,7 +888,7 @@ def decode_directory_tree(tib_path: str) -> Tuple[bytes, bytes]:
 @dataclass
 class FsDirRecord:
     """One fully-decoded directory-tree record. All 161,989 records of
-    the reference NAS_Backup tree parse to EOF cleanly with this layout."""
+    the reference share_backup tree parse to EOF cleanly with this layout."""
     fullpath: str           # e.g. "C:/Documents and Settings/.../foo.jpg"
     basename: str           # last segment of fullpath
     longname: str           # internal: usually duplicates basename
@@ -905,7 +905,7 @@ class FsDirRecord:
 
 def parse_directory_tree(tree_blob: bytes) -> Iterator[FsDirRecord]:
     """Yield :class:`FsDirRecord` for every record in the inflated
-    directory-tree stream. Verified against the reference NAS_Backup
+    directory-tree stream. Verified against the reference share_backup
     fixture: parses all 161,989 records to EOF with zero leftover bytes.
 
     Per-record layout:

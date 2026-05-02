@@ -154,7 +154,7 @@ byte >= 0x80`.
 ## Per-tree configuration in the test archive
 
 These were extracted from the seven L-SB records in
-`Jmicron 0102.tibx`:
+`example.tibx`:
 
 | TLV slot | Name          | `fixed_key` | `fixed_val` | Has on-disk runs |
 |----------|---------------|-------------|-------------|------------------|

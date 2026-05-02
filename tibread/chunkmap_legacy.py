@@ -23,12 +23,12 @@ and has the form:
 
 TLV tag dictionary (FUN_08982090 in product.bin):
 
-  tag 0x02 = u16  bytes per sector       (= 512 in miner1)
-  tag 0x03 = u8   sectors per cluster    (= 8   in miner1; cluster = 4096 B)
-  tag 0x04 = u8   clusters per block     (= 64  in miner1; block = 256 KiB)
-  tag 0x05 = u32  optional, possibly compression alg id (absent in miner1)
+  tag 0x02 = u16  bytes per sector       (= 512 in example)
+  tag 0x03 = u8   sectors per cluster    (= 8   in example; cluster = 4096 B)
+  tag 0x04 = u8   clusters per block     (= 64  in example; block = 256 KiB)
+  tag 0x05 = u32  optional, possibly compression alg id (absent in example)
   tag 0x06 = u24  record count
-  tag 0x07 = u32  optional, transient (absent in miner1)
+  tag 0x07 = u32  optional, transient (absent in example)
   tag 0xD4 = u8   optional boolean flag
 
 Inline records are detected during a forward walk of the block stream:
@@ -51,7 +51,7 @@ file is the MD5 manifest + residual + trailer. The walker recognises
 this state by failing to find a valid block preamble after the inline
 record's zlib ends (within a small lookahead window).
 
-Verified empirically against `/mnt/e/miner1_default_full_b1_s1_v1.tib`
+Verified empirically against `/path/to/legacy_example.tib`
 (8 GB TI 2014 archive): 70,709 data blocks, 2 inline metadata records
 at file offsets 10,431,214 (135 chunkmap records) and 8,773,374,742
 (259,108 chunkmap records). Total: 70,709 partition_blocks indexed.

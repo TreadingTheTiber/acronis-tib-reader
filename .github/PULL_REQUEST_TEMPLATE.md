@@ -14,12 +14,12 @@
 Which `.tib` files did you test against?
 
 - [ ] Synthetic fixtures in `tools/tests/`
-- [ ] Real `.tib` from STORAGE/miner1 (if available)
+- [ ] Real `.tib` from STORAGE/example (if available)
 - [ ] Other: <!-- describe -->
 
 ## Checklist
 
 - [ ] CI is green
-- [ ] No regression on existing STORAGE/miner1 corpus (if accessible)
+- [ ] No regression on existing STORAGE/example corpus (if accessible)
 - [ ] Docstrings / README updated if user-facing behavior changed
 - [ ] CHANGELOG entry added if appropriate

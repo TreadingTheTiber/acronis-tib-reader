@@ -1,14 +1,14 @@
 # TI 2014-era ("legacy") .tib metadata-blob format
 
 Status: decoded by RE agent on 2026-04-30, working from
-`/mnt/e/miner1_default_full_b1_s1_v1.tib` (an 8.78 GB Acronis True Image 16,
+`/path/to/legacy_example.tib` (an 8.78 GB Acronis True Image 16,
 build 6514 backup; product version "16.0.6514" decoded from the embedded
 `<metainfo>` XML).
 
 This document describes how the metadata blob in the **older** .tib format
 differs from the TI 2018+ format documented in `dist/tibread/metadata.py` and
 `dist/docs/METADATA_BLOB_TLV.md` (the "newer" format hereinafter). All
-findings are from `parse_blob` runs on miner1's blob. Confidence labels:
+findings are from `parse_blob` runs on example's blob. Confidence labels:
 **confirmed** = parses cleanly with concrete byte values that line up with
 known fields; **inferred** = consistent with newer-format dictionary but the
 numeric value alone does not prove the meaning.
@@ -199,7 +199,7 @@ region size difference.
 
 #### Implication for blob coverage
 
-After this decoding, miner1's 921-byte metadata blob has **100% coverage**
+After this decoding, example's 921-byte metadata blob has **100% coverage**
 with no remaining opaque regions.  Updated layout:
 
 ```
@@ -328,7 +328,7 @@ start of the main TLV stream.)
 
 ## Tag inventory
 
-**57 distinct (tag, sub) pairs** appear in miner1's blob + trailer.
+**57 distinct (tag, sub) pairs** appear in example's blob + trailer.
 
 ### Tags shared with TI 2018+ (per `decode_metadata_blob.py`)
 
@@ -403,7 +403,7 @@ Instead, the older format encodes chunk-map location implicitly:
 2. **Chunk-map compressed length** is stored in the **20-byte zlib-#1
    inflated struct** at blob_off 18 as the third u32 LE = `0x0000e4e4` =
    58,596 — verified to match the actual chunk-map zlib's compressed length
-   for miner1.
+   for example.
 3. **Chunk-map start offset** = `BLOB_START - compressed_length` = derivable
    once the blob's start is known.
 
@@ -422,7 +422,7 @@ this report does not cover). The TI 2014-era headers are known to differ
 from the 2018+ post-data-region architecture; agent O's empirical block-walk
 agent and the Ghidra version-dispatch agent can confirm.
 
-## Cross-checks against miner1's known fields
+## Cross-checks against example's known fields
 
 | field                             | source                                 | matches |
 |-----------------------------------|----------------------------------------|---------|
@@ -440,7 +440,7 @@ embedded inline within the block stream.  This was confirmed by both the
 SequentialChunkMap Ghidra deep-dive agent (decompiled `FUN_08982090`,
 `SequentialChunkMap` ctor) and the inline-records-decoder agent (independent
 re-derivation).  See `FORMAT_LEGACY_INLINE_RECORDS.md` and
-`/home/colin/tibread/decode_inline_records.py`.
+`/path/to/tibread/decode_inline_records.py`.
 
 Layout:
 
@@ -497,12 +497,12 @@ signature of column-major chunk-map storage, not of a sector dump.
 
 For the first 30 non-sparse records of inline #1, every decoded
 `file_offset + 8` (skipping the 8-byte popcount preamble) starts with the
-`78 01` zlib magic in `miner1_default_full_b1_s1_v1.tib` — a 30/30 hit
+`78 01` zlib magic in `legacy_example.tib` — a 30/30 hit
 rate that is statistically impossible under any other interpretation.
 
 Inline #2 (file_off 8,773,374,742) follows the same format with 259,108
 records, covering the bulk of the chunk-map.  Together inline #1 and #2
-provide all 259,243 chunk-map records for miner1.
+provide all 259,243 chunk-map records for example.
 
 Confidence: **confirmed** — three independent decoders agree on the
 chunk-map interpretation (Ghidra `SequentialChunkMap` ctor decompile +
@@ -536,14 +536,14 @@ matrix-transpose + zigzag-delta + 30/30 zlib-magic validation).
    metadata-sector hypothesis from an earlier agent failed to apply the
    column-major→row-major byte transpose; once applied, all 100 non-sparse
    records decode to valid `(file_offset, length)` pairs that point at
-   `78 01` zlib-magic blocks in miner1.  See section "Inline #1 in the
+   `78 01` zlib-magic blocks in example.  See section "Inline #1 in the
    block stream" above and `FORMAT_LEGACY_INLINE_RECORDS.md`.
 
 ## Files
 
-* Decoder (main metadata blob): `/home/colin/tibread/scan_miner1_metadata.py`
-* Decoder (`0x0048` container + inline #1): `/home/colin/tibread/decode_legacy_blob_tail.py`
-* This document: `/home/colin/tibread/dist/docs/legacy/FORMAT_LEGACY_METADATA.md`
-* Related: `/home/colin/tibread/dist/tibread/metadata.py` (newer-format
-  decoder), `/home/colin/tibread/METADATA_BLOB_TLV.md`,
-  `/home/colin/tibread/dist/docs/legacy/FORMAT_LEGACY.md`.
+* Decoder (main metadata blob): `/path/to/tibread/scan_example_metadata.py`
+* Decoder (`0x0048` container + inline #1): `/path/to/tibread/decode_legacy_blob_tail.py`
+* This document: `/path/to/tibread/docs/legacy/FORMAT_LEGACY_METADATA.md`
+* Related: `/path/to/tibread/tibread/metadata.py` (newer-format
+  decoder), `/path/to/tibread/METADATA_BLOB_TLV.md`,
+  `/path/to/tibread/docs/legacy/FORMAT_LEGACY.md`.

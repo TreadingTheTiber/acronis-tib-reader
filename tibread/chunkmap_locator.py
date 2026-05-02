@@ -21,7 +21,7 @@ offset `data_start + metaDataOffset`).
 The metadata blob is a TLV with various tags (0x4D, 0xD6, 0xD7, 0x8F, 0x48-
 0x4F, 0x58, 0x81, 0x98, 0xA9, ...) describing the source machine, device
 model, GUIDs, computer name, etc.  Inside one of those records (after the
-"GARY-PC-Dg1s"-style computer-name value in our sample) the chunk-map
+"EXAMPLE-PC-Dgs"-style computer-name value in our sample) the chunk-map
 locator is encoded as positional length-prefixed fields:
 
     01 00                 # 1-byte field, value 0x00 (purpose unknown)
@@ -71,7 +71,7 @@ hands the raw zlib stream to `zlib.decompress`.
 Returns `(zlib_offset, zlib_size)` — the args expected by the existing
 `build_skipmap_from_tib.decode_chunk_map(...)`.
 
-== Verification on /mnt/e/STORAGE (R)_full_b1_s1_v1.tib ==
+== Verification on /path/to/example_full_b1_s1_v1.tib ==
 
   metaDataOffset           = 1,143,108,355,647  (concat)
   V (chunkmap_concat)       = 1,143,065,854,211  (concat; metaDataOffset - 42,501,436)
@@ -152,7 +152,7 @@ def _read_volume_header(f) -> Tuple[int, int]:
     #         etc. that ship alongside a master)
     #   0x04 LDIR page — likewise a slice-continuation
     # The earlier "QARCH at offset 7" detection was a coincidence — the
-    # Jmicron sample's CRC happened to end in 0x51 ('Q'). Real detection
+    # example sample's CRC happened to end in 0x51 ('Q'). Real detection
     # is the magic at offset 8 plus the page-envelope shape.
     # .tibx page envelope: byte 0 = 0x41 ('A'), bytes 2-3 = 0, bytes 4-7 = CRC32C.
     # Page-type byte at offset 1 distinguishes:

@@ -5,11 +5,11 @@ Specifically resolves a now-disproven working hypothesis from the block-walk
 investigation that the first inline metadata record was a "20-byte chunk
 header + 100 × 16-byte MD5 fingerprints".
 
-It is not. **Both** inline records in miner1 are `SequentialChunkMap`
+It is not. **Both** inline records in example are `SequentialChunkMap`
 fragments, exactly matching the format already documented in
 `FORMAT_LEGACY.md` § "Inline `SequentialChunkMap` records".
 
-Test artifact: `/mnt/e/miner1_default_full_b1_s1_v1.tib` (8.78 GB,
+Test artifact: `/path/to/legacy_example.tib` (8.78 GB,
 TI 16 build 6514).
 
 ---
@@ -106,7 +106,7 @@ Reasoning:
    The reader's discriminator (`FORMAT_LEGACY.md` § "Locating inline
    records when reading") is "is this a small u8 in [8..32] followed
    within ~24 bytes by `78 01`?" — a very tight, deterministic test.
-2. Earlier scans (`scan_miner1.py`, the block-walk agent's exhaustive
+2. Earlier scans (`scan_example.py`, the block-walk agent's exhaustive
    walk, and the `tibread.chunkmap_legacy.discover_inline_chunkmaps_legacy`
    sequential walker) all converge on exactly two inline records.
 3. The cumulative chunk-map record count is **135 + 259,108 = 259,243**,
@@ -149,10 +149,10 @@ below.
 
 ---
 
-## Coverage of miner1's bytes
+## Coverage of example's bytes
 
 With the inline records correctly identified as chunk-map fragments,
-miner1's byte-level coverage is:
+example's byte-level coverage is:
 
 | Range | Description | Status |
 |---|---|---|
@@ -169,7 +169,7 @@ The only piece **not** at 100% byte-decode is the legacy "residual region"
 multi-stream container). That is a separate workstream and unrelated to
 the inline records.
 
-So with this finding, **miner1 inline-record coverage is at 100%, fully
+So with this finding, **example inline-record coverage is at 100%, fully
 consistent with the existing legacy spec**. The brief's "ONLY remaining
 unidentified piece" was based on a misreading of `FORMAT_LEGACY.md`'s
 own internal inconsistency.
@@ -204,16 +204,16 @@ quoted paragraph should be removed/replaced with:
 | Inline #1 = `[u8 L=0x11][17B TLV][338B zlib → 1620B → 135×12B records]` | byte-decode (this script) |
 | Inline #2 = `[u8 L=0x13][19B TLV][316,334B zlib → 3,109,296B → 259,108×12B records]` | byte-decode (this script) |
 | The "20-byte header + 100 MD5" framing does not exist | byte-decode (block 0 hash mismatch) |
-| Only two inline records in miner1 | inferred from prior exhaustive scans + format constraints |
+| Only two inline records in example | inferred from prior exhaustive scans + format constraints |
 | MD5 manifest in the tail covers 0..N-1 (not 100..N-1) | inferred (cross-check needed against `decode_legacy_tail.py`) |
-| Inline-record placement strategy: one early flush + one final flush | inferred from miner1; not yet cross-checked against other legacy archives |
+| Inline-record placement strategy: one early flush + one final flush | inferred from example; not yet cross-checked against other legacy archives |
 
 ---
 
 ## Reproduction
 
 ```bash
-python3 /home/colin/tibread/decode_inline_records.py
+python3 /path/to/tibread/decode_inline_records.py
 ```
 
 Output matches the tables above.

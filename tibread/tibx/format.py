@@ -99,7 +99,7 @@ SG_PAYLOAD_OFFSET = 0x2C       # Zstd frame begins here on the SG page
 # handles every observed Zstd preset).
 #
 # The Zstd preset list was empirically verified by walking every SG
-# segment in the reference archive ``Jmicron 0102.tibx`` (263,063
+# segment in the reference archive ``example.tibx`` (263,063
 # segments total) and checking that every ``comp=0x03xx`` payload
 # starts with the Zstd frame magic ``28 b5 2f fd`` and decompresses to
 # ``len`` bytes.  Variant ``0x0303`` was missed by the original RE pass
@@ -133,7 +133,7 @@ ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 
 # CRC-32C (Castagnoli): polynomial 0x1EDC6F41, reflected input/output,
 # init 0xFFFFFFFF, final XOR 0xFFFFFFFF.  Reflected polynomial constant
-# is 0x82F63B78.  Verified empirically against ``Jmicron 0102.tibx`` —
+# is 0x82F63B78.  Verified empirically against ``example.tibx`` —
 # every page's stored BE u32 at +0x04 matches CRC32C of the page with
 # the CRC field zero-filled.
 
@@ -238,7 +238,7 @@ def read_stored_page_crc32(page: bytes) -> int:
 META_KEYS_MAX = 20
 
 # Empirical positional → key-name mapping observed on
-# ``Jmicron 0102.tibx`` (header_version=8). The slot indices line up
+# ``example.tibx`` (header_version=8). The slot indices line up
 # with ``ar_meta_keys``; positions where the test archive carries a
 # value give us the key name. Unobserved positions are left blank
 # until another sample archive populates them.
@@ -325,7 +325,7 @@ class VolumeTableEntry:
     ``idx`` is a per-archive volume index (0-based); ``byte_offset`` is
     the source-disk byte offset where the volume's first sector lives.
 
-    Empirically (e.g. ``Jmicron 0102.tibx``) a whole-disk image archive
+    Empirically (e.g. ``example.tibx``) a whole-disk image archive
     carries a single ``(idx=0, byte_offset=0)`` record — i.e. one
     "volume" covering the entire disk. Per-partition archives are
     expected to carry one record per partition with the byte offsets

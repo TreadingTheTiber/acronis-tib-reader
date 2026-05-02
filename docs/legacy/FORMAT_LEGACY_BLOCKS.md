@@ -1,6 +1,6 @@
 # TI 2014-Era (Legacy) .tib Block Format
 
-Empirically derived from `/mnt/e/miner1_default_full_b1_s1_v1.tib`
+Empirically derived from `/path/to/legacy_example.tib`
 (8,776,798,720 bytes, dated 2014-01-17, magic `0xA2B924CE`, version 0).
 
 Compare with `FORMAT.md` (newer 2018+ variant) — the legacy variant differs
@@ -87,7 +87,7 @@ Both forms have the prefix `… 02 03 00 01 08 04 00 01 40 06 00 …`. The trail
 field varies — appears to be a length or count related to the metadata payload
 that follows.
 
-### Empirical inline records in miner1
+### Empirical inline records in example
 
 | # | abs offset       | TLV len | md_zlib_comp | md_decomp | tail_pad | role                              |
 |---|------------------|---------|--------------|-----------|----------|-----------------------------------|
@@ -132,11 +132,11 @@ consistent with smaller offsets in the smaller files of this era.
 
 ---
 
-## Empirical scan results — miner1
+## Empirical scan results — example
 
-Scanner: `/home/colin/tibread/scan_miner1.py`
-Index:   `/home/colin/tibread/miner1_blocks.idx`
-Log:     `/home/colin/tibread/scan_miner1_full.log`
+Scanner: `/path/to/tibread/scan_example.py`
+Index:   `/path/to/tibread/example_blocks.idx`
+Log:     `/path/to/tibread/scan_example_full.log`
 
 * **scan elapsed:** 85.8 s on WSL drvfs (~825 blocks/s end-to-end)
 * **block stream range:** `[32 .. 8,773,374,742)`
@@ -207,7 +207,7 @@ header  : b"TIBIDX02"               # 8 B
         + u64 tib_size
         + u64 data_start            # = 32 (after volume header)
         + u64 data_end              # = end of last block in file
-        + u64 block_count           # = 70,709 for miner1
+        + u64 block_count           # = 70,709 for example
 records : block_count × {
             u64 file_offset         # absolute byte offset of this block in .tib
             u8  preamble[16]        # legacy: first 8 B real bitmap, last 8 B = 0
@@ -257,8 +257,8 @@ hypothesis in the scanner module.
 
 ## Files
 
-* `/home/colin/tibread/scan_miner1.py` — scanner (modes: `--stats`,
+* `/path/to/tibread/scan_example.py` — scanner (modes: `--stats`,
   `--build-idx`).
-* `/home/colin/tibread/miner1_blocks.idx` — built index (TIBIDX02, 70,709
+* `/path/to/tibread/example_blocks.idx` — built index (TIBIDX02, 70,709
   records, ~1.98 MB).
-* `/home/colin/tibread/scan_miner1_full.log` — full scan log.
+* `/path/to/tibread/scan_example_full.log` — full scan log.

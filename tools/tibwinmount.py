@@ -10,7 +10,7 @@ Prerequisites:
   2. pip install winfspy
 
 Usage:
-  python tibwinmount.py "E:\\STORAGE (R)_full_b1_s1_v1.tib" "E:\\blocks.idx" H:
+  python tibwinmount.py "E:\\example_full_b1_s1_v1.tib" "E:\\blocks.idx" H:
 
 Notes:
   - Reuses tibreader.py and ntfsread.py from the Linux side (pure-Python, both

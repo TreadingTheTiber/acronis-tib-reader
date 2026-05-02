@@ -32,7 +32,7 @@ Why there is no ``segment 3 = u16 chunk-id index``
 --------------------------------------------------
 
 Earlier exploratory notes hypothesised that the 4th SG segment in
-``Jmicron 0102.tibx`` (the 139,264-byte segment starting at page 9)
+``example.tibx`` (the 139,264-byte segment starting at page 9)
 was a flat ``u16`` array mapping ``chunk_id -> segment_id``.  Empirical
 inspection refutes this:
 
@@ -57,7 +57,7 @@ inspection refutes this:
   byte-range, not a fixed-stride chunk array.
 
 The authoritative chunk -> segment mapping lives in the
-``segment_map`` LSM tree (L-SB index 2 in ``Jmicron 0102.tibx``, root
+``segment_map`` LSM tree (L-SB index 2 in ``example.tibx``, root
 page 13,347,532).  Decoding that tree's cells is the next step on the
 critical path.
 """
@@ -71,7 +71,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from .reader import TibxReader
 
 
-# Empirical: the first SG segment in Jmicron 0102.tibx covers source-disk
+# Empirical: the first SG segment in example.tibx covers source-disk
 # bytes [0, BOOTSTRAP_LEN).  The value is the segment's ``length`` field.
 BOOTSTRAP_LEN = 262_144  # 256 KiB
 
@@ -122,7 +122,7 @@ def read_lba_range(
     length : int
         Number of bytes to return.  Must be > 0.
     sector_size : int, optional
-        Bytes per LBA.  Defaults to 512, matching the JMicron source
+        Bytes per LBA.  Defaults to 512, matching the Example source
         disk's MBR layout.
 
     Returns

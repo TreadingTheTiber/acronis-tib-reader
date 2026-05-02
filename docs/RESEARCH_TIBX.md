@@ -110,7 +110,7 @@ Things nobody has publicly done:
 3. **Diff two `.tibx` files** of known content (e.g., back up an empty 1 MB volume, then back up a 1 MB volume with one known file). Compare resulting databases to identify chunk/blob tables.
 4. **Publish a Kaitai Struct `.ksy`** for the leading header + SQLite schema once known. There would be genuine community appetite for this — it just hasn't been done.
 
-The user's 51 GB `Jmicron 0102.tibx` is a poor first specimen for #1 and #3 (large, unknown contents, expensive to iterate on). A small known-plaintext sample (a 100 MB synthetic volume backed up locally with Acronis Free Trial) is the right starting point.
+The user's 51 GB `example.tibx` is a poor first specimen for #1 and #3 (large, unknown contents, expensive to iterate on). A small known-plaintext sample (a 100 MB synthetic volume backed up locally with Acronis Free Trial) is the right starting point.
 
 ---
 

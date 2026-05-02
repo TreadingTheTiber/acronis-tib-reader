@@ -2,7 +2,7 @@
 
 Source: decompilation of `archive3.dll` (build "Acronis Archive3 v8") via
 Ghidra MCP at `http://127.0.0.1:8089/?program=archive3.dll`, plus
-empirical inspection of `Jmicron 0102.tibx` (54.6 GB sample, header
+empirical inspection of `example.tibx` (54.6 GB sample, header
 version 8). Confidence is annotated `[CONFIRMED]` (verified directly
 by decompiling named functions and matching empirical bytes) or
 `[INFERRED]` (deduced from naming, strings, or partial decompilation).
@@ -113,7 +113,7 @@ Quick reference (full evidence in `ARCHIVE3_TLV_DIRECTORY.md`):
 ## 2. Slice LSM tree shape (TLV[5])
 
 `[CONFIRMED]` from L-SB inspection of the user's archive
-(`Jmicron 0102.tibx`, latest ARCH page = 13347627):
+(`example.tibx`, latest ARCH page = 13347627):
 
 ```
 TLV[5] slices  ver=2  ctree_count=3  mem_nodes=2  ctree[2..N]=EMPTY
@@ -135,7 +135,7 @@ cell stream** used by LEAF pages.  It can be decoded directly with
 `lsm_cells.decode_cells_compact(buf, count=mem_nodes, fixed_key_size=4,
 fixed_val_size=132)`.
 
-For `Jmicron 0102.tibx` this yields:
+For `example.tibx` this yields:
 
 | cell | alive? | key (BE u32 slice_id) | value         |
 |-----:|--------|-----------------------|---------------|
@@ -425,7 +425,7 @@ A `slice_id`-based walk is the canonical mount-time replay sequence.
   identity, not any single chain's identity. The first FULL slice's
   UUID is the *chain* identity (via `archive_slice_get_base_uuid`).
 
-In `Jmicron 0102.tibx` the archive_uuid is
+In `example.tibx` the archive_uuid is
 `655f4ba513f6efc834432712570b1240` (16 B), which is **not** equal to
 either of the two slice UUIDs in the slices tree — confirming that
 archive UUID and slice UUID are independent.
@@ -464,7 +464,7 @@ matching the on-disk schema bytes. The earlier "umap loader is wired
 to `arch+0x12a8` (TLV[7])" claim was wrong — TLV[7] is `keymap`
 (encryption key store), not `umap`.
 
-`[CONFIRMED]` empirical: TLV[6] in `Jmicron 0102.tibx` has
+`[CONFIRMED]` empirical: TLV[6] in `example.tibx` has
 `item_count=2` (mem-tree) and a small ctree[2] root LDIR at page
 13347623 with **7 child LEAF pages** holding ~199 keys each. The
 20-byte key has the structure:
@@ -556,7 +556,7 @@ asserting `key_len == 20`.
 ## Appendix B — empirical L-SB dump for the user's archive
 
 ```
-Archive: /mnt/e/Jmicron 0102.tibx
+Archive: /path/to/example.tibx
 File size: 54,671,892,480 bytes (13,347,628 pages of 4 KiB)
 Latest ARCH page: 13347627 (header_version=8, hdr_size=0x1540)
 Archive UUID: 655f4ba5-13f6-efc8-3443-2712570b1240

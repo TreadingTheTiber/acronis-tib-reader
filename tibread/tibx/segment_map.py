@@ -11,7 +11,7 @@ record describing where the segment lives in the .tibx file::
     +12..+32 20 B    sha1_hash     # content fingerprint (20 raw bytes)
 
 The mixed endianness is empirical: scanning every entry in
-``Jmicron 0102.tibx`` (263 063 segments) gives a byte-perfect match
+``example.tibx`` (263 063 segments) gives a byte-perfect match
 between ``page_count`` decoded LE-u32 and the SgSegment.page_span()
 counted directly from the SG header pages, and between ``page_offset``
 decoded BE-u32 and the actual page index of the segment.  Mismatches:

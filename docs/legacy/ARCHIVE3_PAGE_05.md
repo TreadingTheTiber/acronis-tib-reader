@@ -11,7 +11,7 @@
   `c:\ja\workspace\pipeline\ab-backup-archive3\libarchive3\golomb.c`.
   Logged at archive open as `ar#%u: Upgrade ver.7: create golomb filter`.
 - Empirical decode of the 11 contiguous instances at pages
-  `13347605..13347615` in `Jmicron 0102.tibx` (the only `0x05` pages in
+  `13347605..13347615` in `example.tibx` (the only `0x05` pages in
   that 13.4 M-page archive).
 
 ## Identity (high confidence)
@@ -84,7 +84,7 @@ time the page is loaded.
 
 ## Empirical verification
 
-For the 11 0x05 pages in `Jmicron 0102.tibx`:
+For the 11 0x05 pages in `example.tibx`:
 
 | page      | values decoded | bits used / 32704 | bits/value | mean delta |
 |-----------|---------------:|------------------:|-----------:|-----------:|

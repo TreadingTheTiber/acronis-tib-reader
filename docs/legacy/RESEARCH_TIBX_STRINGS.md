@@ -1,6 +1,6 @@
 # RESEARCH: archive3.dll Strings Mining
 
-Source: `~/archive3_re/archive3_strings.txt` (253 KB) and `archive3_adapter_strings.txt` (24 KB) on `strider-lenovocalibre2`. Binary analyzed: `archive3.dll` from Acronis True Image 2024 install.
+Source: `~/archive3_re/archive3_strings.txt` (253 KB) and `archive3_adapter_strings.txt` (24 KB) on `re-host`. Binary analyzed: `archive3.dll` from Acronis True Image 2024 install.
 
 Confidence convention used in this document:
 - **[CONFIRMED]** — text appears verbatim in the strings dump.

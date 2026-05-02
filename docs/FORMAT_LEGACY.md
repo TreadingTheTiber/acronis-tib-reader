@@ -4,7 +4,7 @@ Companion to `FORMAT.md`, which describes the modern (TI 2018+) sector-mode
 layout. This document is the consolidated user-facing spec for the **legacy**
 sector-mode `.tib` format that TI 2018+ retains read-only support for.
 
-Empirically validated against `/mnt/e/miner1_default_full_b1_s1_v1.tib`
+Empirically validated against `/path/to/legacy_example.tib`
 (8.78 GB, January 2014, Acronis True Image 16 build 6514) and cross-checked
 against decompilation of `product.bin`'s `SequentialImageStream` /
 `SequentialChunkMap` constructors.
@@ -110,7 +110,7 @@ Each block:
 Blocks are back-to-back with no padding except for the inline-metadata records
 described below.
 
-### Empirical statistics (miner1)
+### Empirical statistics (example)
 
 | Metric | Value |
 |---|---|
@@ -151,7 +151,7 @@ remaining 63 bits (`raw >> 1`). Negative deltas use plain `-mag`, **not**
 
 Tags read by `SequentialChunkMap::ctor` (`FUN_08982090`):
 
-| Tag    | Meaning                          | miner1 value |
+| Tag    | Meaning                          | example value |
 |--------|----------------------------------|---|
 | `0x02` | sector size (bytes/sector)       | `0x200 = 512` |
 | `0x03` | sectors per cluster              | `0x08 = 8` |
@@ -166,10 +166,10 @@ payload = `tag2 × tag3 × tag4` = 256 KiB.
 
 > **Note**: an earlier draft of this document mis-mapped tag 3 as
 > "clusters per block". The correct mapping (confirmed by both
-> decompilation and miner1 byte-decode) is **tag 4 = clusters per block,
+> decompilation and example byte-decode) is **tag 4 = clusters per block,
 > tag 3 = sectors per cluster, tag 2 = bytes per sector**.
 
-### Sample record locations (miner1)
+### Sample record locations (example)
 
 ```
 inline #1 @ file offset 10,431,214
@@ -211,7 +211,7 @@ does the latter.
 
 ---
 
-## Post-block-stream tail (~3 MB on miner1)
+## Post-block-stream tail (~3 MB on example)
 
 After the last inline `SequentialChunkMap` record, the file contains a
 **MD5 dedup manifest** followed by a small **residual region**, then the
@@ -239,7 +239,7 @@ batch — the inline records earlier in the file serve a different purpose.
 Inline records #1 and #2 are **split SequentialChunkMap fragments**, not
 MD5-fingerprint batches. Each has the structure
 `[u8 L][L-byte TLV header][zlib stream of 12-byte chunk-map records]`
-(e.g. on miner1: TLV tags `0x02=512`, `0x03=8`, `0x04=64`, `0x06=record_count`).
+(e.g. on example: TLV tags `0x02=512`, `0x03=8`, `0x04=64`, `0x06=record_count`).
 Inline #1 = 356 bytes on disk → 135 chunk-map records; inline #2 → 259,108
 chunk-map records. Together they index all 259,243 stored extents — they
 are an *extent map*, not a hash batch.
@@ -378,7 +378,7 @@ header):
 block_count × { u64 file_offset, preamble_len-byte preamble, u32 comp_len }
 ```
 
-For miner1: `clusters_per_block=64`, `preamble_len=8`. The modern format
+For example: `clusters_per_block=64`, `preamble_len=8`. The modern format
 continues to use the older `TIBIDX02` (fixed 16-byte preamble, 128 clusters
 per block) for backward compatibility.
 
@@ -394,7 +394,7 @@ instant.
 | Finding | Source |
 |---|---|
 | Format dispatcher = TLV tag `0x9b` | Decompiled (FUN_08973290) |
-| 8-byte preamble + 64-cluster blocks | Empirical + decompilation (TLV tag 4 = 64 in miner1) |
+| 8-byte preamble + 64-cluster blocks | Empirical + decompilation (TLV tag 4 = 64 in example) |
 | TLV tag 4 = clusters/block (NOT tag 3) | Empirical (corrected from earlier draft) |
 | Chunk map records are 12-byte zigzag-delta + matrix transpose + zlib | Decompiled + empirical (135/135 + 259108/259108 records validated against block-stream offsets) |
 | Chunk map lives INLINE in the block stream | Empirical (corrected from earlier draft) |

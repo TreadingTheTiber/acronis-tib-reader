@@ -2,7 +2,7 @@
 
 Verifies that :meth:`TibxReader.read_lba_range` correctly returns the
 MBR signature from the source disk in the reference archive
-``Jmicron 0102.tibx``.
+``example.tibx``.
 
 These tests are skipped when the reference archive isn't available on
 the host (CI runners, non-developer checkouts, etc.).
@@ -30,7 +30,7 @@ from tibread.tibx import (  # noqa: E402
 
 # Reference archive path.  Override with TIBREAD_TIBX_FIXTURE if needed
 # (e.g. for CI machines that mount the file at a different path).
-DEFAULT_FIXTURE = "/mnt/e/Jmicron 0102.tibx"
+DEFAULT_FIXTURE = "/path/to/example.tibx"
 FIXTURE = os.environ.get("TIBREAD_TIBX_FIXTURE", DEFAULT_FIXTURE)
 
 

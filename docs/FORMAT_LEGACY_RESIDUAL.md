@@ -1,11 +1,11 @@
 # FORMAT_LEGACY_RESIDUAL.md - The 1.89 MB residual region in TI 2014-era `.tib`
 
 Companion to `FORMAT_LEGACY_TAIL.md`.  That document classifies the 3.10 MB
-post-block-stream tail of miner1's `.tib` into a 1.08 MB MD5 dedup manifest
+post-block-stream tail of example's `.tib` into a 1.08 MB MD5 dedup manifest
 plus a 1.89 MB "residual region" of unknown internal structure.  This document
 decodes that residual.
 
-Empirically derived from `/mnt/e/miner1_default_full_b1_s1_v1.tib`
+Empirically derived from `/path/to/legacy_example.tib`
 (8,776,798,720 bytes, 70,709 blocks, two source volumes).
 
 > **TL;DR**: the residual region is **the legacy format's pre-trailer
@@ -41,7 +41,7 @@ Empirically derived from `/mnt/e/miner1_default_full_b1_s1_v1.tib`
 
 ---
 
-## File-offset map (miner1)
+## File-offset map (example)
 
 The residual occupies bytes `[1,129,744 .. 3,107,417)` of the post-block-stream
 tail, equivalently `[8,774,820,840 .. 8,776,798,513)` in the full `.tib`.
@@ -100,7 +100,7 @@ entropy" only because deflate output is naturally near-uniform.
 | Volume4 NTFS-allocated cluster count    | 4,743,112 | 0             |
 | Volume4 backed-up clusters (= 17.16 GiB)| 4,499,776 | -243,336      |
 | Both volumes' stored clusters (= 70,709 × 64) | 4,525,376 | -217,736 |
-| Block count (`scan_miner1.py`)          | 70,709    | -- (unrelated) |
+| Block count (`scan_example.py`)          | 70,709    | -- (unrelated) |
 
 The count is the **total NTFS-allocated cluster count for Volume4** as
 reported by NTFS at backup time.  It is *not* the count of clusters that
@@ -502,7 +502,7 @@ volume entries.
 
 ## Tools
 
-- `/home/colin/tibread/decode_legacy_residual.py` -- analyser.
+- `/path/to/tibread/decode_legacy_residual.py` -- analyser.
   - `--map`: structural run map at 4-byte resolution
   - `--header`: decode the 16-byte residual header
   - `--zlib`: enumerate embedded zlib streams
@@ -511,10 +511,10 @@ volume entries.
   - `--partitions`: extract trailing TLV partition descriptors
   - `--blobs`: statistical analysis of opaque blobs
   - `--all`: run everything
-- `/home/colin/tibread/decode_legacy_tail.py dump <m> <r>` -- prerequisite
+- `/path/to/tibread/decode_legacy_tail.py dump <m> <r>` -- prerequisite
   to extract the residual to `/tmp/legacy_residual.bin`.
 
-## Key constants (miner1)
+## Key constants (example)
 
 ```
 residual file offset bounds:    [8,774,820,840 .. 8,776,798,513)

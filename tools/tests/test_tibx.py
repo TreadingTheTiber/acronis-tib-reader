@@ -1,7 +1,7 @@
 """Integration tests for the .tibx LSM-index reader.
 
 These tests run end-to-end against the reference archive
-``Jmicron 0102.tibx`` (54 GiB Acronis archive3 v8 file).  They cover:
+``example.tibx`` (54 GiB Acronis archive3 v8 file).  They cover:
 
 * :meth:`TibxReader.read_arch_header` — extracts hostname, disk GUID,
   agent build, archive UUID from the page-0/1 metadata.
@@ -36,7 +36,7 @@ from tibread.tibx import (  # noqa: E402
 )
 
 
-DEFAULT_FIXTURE = "/mnt/e/Jmicron 0102.tibx"
+DEFAULT_FIXTURE = "/path/to/example.tibx"
 FIXTURE = os.environ.get("TIBREAD_TIBX_FIXTURE", DEFAULT_FIXTURE)
 
 

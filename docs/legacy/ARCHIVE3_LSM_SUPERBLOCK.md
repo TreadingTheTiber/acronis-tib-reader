@@ -5,7 +5,7 @@ the LSM B-tree page envelope, and the per-tree key/value layouts used by
 Acronis archive3 (`.tibx`) files.
 
 Source: decompilation of `archive3.dll` (build `Acronis Archive3 v8`).
-Cross-validated against `Jmicron 0102.tibx` (54.6 GB sample, format
+Cross-validated against `example.tibx` (54.6 GB sample, format
 version 8). Confidence per fact is annotated `[CONFIRMED]` (verified
 directly by decompilation of named functions and matched empirically
 against bytes in the sample) or `[INFERRED]` (deduced but not
@@ -69,7 +69,7 @@ pointer.
 > actually TLV[5]=`smap`/slices).
 
 Schema bytes (key/value sizes) per TLV slot, empirically validated on
-`Jmicron 0102.tibx` (header v8):
+`example.tibx` (header v8):
 
 | TLV slot | Canonical name (per `ARCHIVE3_TLV_DIRECTORY.md`) | Key size | Value size |
 |---------:|--------------------------------------------------|----------|------------|
@@ -124,7 +124,7 @@ level 1 is the residual `memtree_extra_payload`). Layout per slot:
 +0x18  8   max_key_or_size        BE u64  (printed as "max" by dumper; varies)
 ```
 
-## Empirical L-SB dump (Jmicron 0102.tibx, latest ARCH page = 13347627)
+## Empirical L-SB dump (example.tibx, latest ARCH page = 13347627)
 
 ```
 TLV[0]=imap (lsm)    ver=2 ctree_count=3 max=12 seq=0   key/val=0/0
@@ -310,7 +310,7 @@ the `dedup_map` tree. The post-header init `FUN_1800094a0` calls
 is **refuted** — the binary's own creator function names this slot
 `dedup_map`. See `ARCHIVE3_TLV_DIRECTORY.md` for full evidence.
 
-Empirical observations from `Jmicron 0102.tibx`:
+Empirical observations from `example.tibx`:
 
 * Root LDIR at byte offset `0xcbab14000` decompresses to 1190 bytes
   (= 70 records of 9 + 8 = 17 bytes each).

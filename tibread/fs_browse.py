@@ -223,7 +223,7 @@ def _find_next_m_chunk(f, start: int, bound: int) -> int:
     integrated Adler32 check eliminates them.
 
     The decompression cost is one full chunk inflate per f-batch
-    boundary (≤ 150 such boundaries in NAS_Backup) — negligible
+    boundary (≤ 150 such boundaries in share_backup) — negligible
     compared to the cost of a wrong-positioned drift through the rest
     of the archive.
 

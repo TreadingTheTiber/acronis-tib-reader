@@ -218,8 +218,8 @@ class PackageImportTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-_BLOCKS_IDX = "/home/colin/tibread/blocks.idx"
-_BLOCKS_V10_IDX = "/home/colin/tibread/blocks_v10.idx"
+_BLOCKS_IDX = "/path/to/tibread/blocks.idx"
+_BLOCKS_V10_IDX = "/path/to/tibread/blocks_v10.idx"
 
 
 class IndexFormatCompatibilityTests(unittest.TestCase):

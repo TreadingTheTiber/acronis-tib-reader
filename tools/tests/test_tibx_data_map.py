@@ -3,7 +3,7 @@
 The pure-Python tests exercise :func:`decode_key` / :func:`decode_value`
 round-trip behaviour and don't need the reference archive.
 
-The fixture-bound tests run against ``Jmicron 0102.tibx`` and verify a
+The fixture-bound tests run against ``example.tibx`` and verify a
 handful of empirically-known lookups:
 
 * For volume 10 (the main partition stream) at source byte 0, the
@@ -52,7 +52,7 @@ from tibread.tibx.data_map import (  # noqa: E402
 )
 
 
-DEFAULT_FIXTURE = "/mnt/e/Jmicron 0102.tibx"
+DEFAULT_FIXTURE = "/path/to/example.tibx"
 FIXTURE = os.environ.get("TIBREAD_TIBX_FIXTURE", DEFAULT_FIXTURE)
 
 
@@ -139,7 +139,7 @@ class DecodeValueRoundTripTests(unittest.TestCase):
     f"reference archive not available at {FIXTURE}",
 )
 class TibxDataMapFixtureTests(unittest.TestCase):
-    """Integration tests against the reference ``Jmicron 0102.tibx``.
+    """Integration tests against the reference ``example.tibx``.
 
     Ground truth (verified by the data_map decoder agent):
     * The data_map tree contains many extents covering volume 10.
