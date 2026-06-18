@@ -31,7 +31,11 @@ from .format import (
     PAGE_BODY_SIZE,
     PAGE_SIZE,
     PAGE_TYPE_ARCH,
+    PAGE_TYPE_ARCI,
     PAGE_TYPE_DATA,
+    PAGE_TYPE_GOLOMB,
+    PAGE_TYPE_LDIR,
+    PAGE_TYPE_LEAF,
     SG_HEADER_OFFSET,
     compute_page_crc32,
     crc32c,
@@ -149,6 +153,7 @@ class TibxReader:
 
     def __init__(self, path: str) -> None:
         self.path = path
+        self.global_base = 0
         self._fh = open(path, "rb", buffering=0)
         self.file_size = os.fstat(self._fh.fileno()).st_size
         if self.file_size % PAGE_SIZE != 0:
@@ -161,18 +166,65 @@ class TibxReader:
                 f"{path}: file is empty (not a valid .tibx page store)"
             )
         self.page_count = self.file_size // PAGE_SIZE
-        # Validate that page 0 looks like an ARCH/QARCH page so we fail
-        # early on obviously-wrong inputs.
+        # Validate that page 0 carries a valid 0x41 page envelope so we
+        # fail early on obviously-wrong inputs.  In the common single-file
+        # layout the master ARCH header is at page 0, but split multi-file
+        # archives (a tiny ARCH "pointer" .tibx plus large -NNNN.tibx data
+        # slices) put data/index pages first and carry the slice's own
+        # ARCH header at the *tail* (located by find_latest_arch_page).
+        # Accept any known page type at page 0 so those data slices open.
         page0 = self._raw_read_page(0)
-        if page0[0] != 0x41 or page0[1] != PAGE_TYPE_ARCH:
+        _VALID_PAGE0_TYPES = {
+            PAGE_TYPE_ARCH, PAGE_TYPE_ARCI, PAGE_TYPE_LEAF,
+            PAGE_TYPE_LDIR, PAGE_TYPE_GOLOMB, PAGE_TYPE_DATA,
+        }
+        if page0[0] != 0x41 or page0[1] not in _VALID_PAGE0_TYPES:
             raise ValueError(
-                f"{path}: page 0 does not start with the expected "
-                f"0x41 0x01 ARCH page magic (got {page0[:4].hex()})"
+                f"{path}: page 0 does not start with a valid 0x41 page "
+                f"envelope (got {page0[:4].hex()})"
             )
         if page0[SG_HEADER_OFFSET - 1 : SG_HEADER_OFFSET + 4] != b"Q" + INNER_MAGIC_ARCH:
             # Tolerate plain ARCH on page 0 (some archives may not use the
             # leading Q qualifier), but warn via a soft check.
             pass
+
+        # Global-page translation for split multi-file archives.  In those
+        # archives every page reference stored inside the LSM trees (ctree
+        # roots, LDIR/LEAF child pointers) is a *global* page index into
+        # the logical concatenation of all slice files, while this file
+        # only physically holds a window of that space.  The window's
+        # starting global page is recorded in the slice's own ARCH header
+        # at body offset 0x210 (BE u64).  We subtract it on read so the
+        # walker's global indices resolve to local file positions.  For a
+        # normal single-file archive (ARCH at page 0) the base is 0 and no
+        # translation happens.  ``global_base`` must be > page_count to be
+        # meaningful (global indices are always far above the local count),
+        # otherwise we treat it as 0 to stay safe.
+        self.global_base = 0
+        self.global_base = self._compute_global_base(page0)
+
+    def _compute_global_base(self, page0: bytes) -> int:
+        """Return this file's starting global page index, or 0 if none."""
+        # Single-file archives carry the master ARCH at page 0 and use
+        # plain (local == global) page indexing.
+        if page0[1] == PAGE_TYPE_ARCH:
+            return 0
+        try:
+            from .lsm import find_latest_arch_page
+            _ap, body = find_latest_arch_page(self)
+            if len(body) < 0x218:
+                return 0
+            base = struct.unpack_from(">Q", body, 0x210)[0]
+        except Exception:
+            return 0
+        # For a split-archive data slice (page 0 is not ARCH) the 0x210
+        # field is this slice's starting global page, which may legitimately
+        # be smaller than the slice's own page count.  Sanity-cap it to a
+        # plausible magnitude (a 64-bit page index in the exabyte range is
+        # clearly junk) and otherwise trust it.
+        if base <= 0 or base > (1 << 48):
+            return 0
+        return base
 
     # ------------------------------------------------------------------ #
     # Resource management
@@ -200,6 +252,12 @@ class TibxReader:
     # ------------------------------------------------------------------ #
 
     def _raw_read_page(self, page_idx: int) -> bytes:
+        # Translate a global page index (split multi-file archive) to a
+        # local file position.  global_base is always far larger than the
+        # local page count, so this is unambiguous: indices >= base are
+        # global references from the LSM trees; smaller indices are local.
+        if self.global_base and page_idx >= self.global_base:
+            page_idx -= self.global_base
         if page_idx < 0 or page_idx >= self.page_count:
             raise IndexError(
                 f"page index {page_idx} out of range "
