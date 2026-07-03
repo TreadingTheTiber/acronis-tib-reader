@@ -445,7 +445,12 @@ def find_latest_arch_page(reader) -> Tuple[int, bytes]:
     scan_window = min(reader.page_count, 64)
     for p in range(reader.page_count - 1,
                    max(-1, reader.page_count - scan_window - 1), -1):
-        ptype, body = reader.read_page(p, validate_crc=False)
+        # Some slices carry non-LSM padding pages in their tail; skip
+        # any page that isn't a clean 0x41 envelope rather than aborting.
+        try:
+            ptype, body = reader.read_page(p, validate_crc=False)
+        except (OSError, IndexError, ValueError):
+            continue
         if ptype == PAGE_TYPE_ARCH and body[:4] == INNER_MAGIC_ARCH:
             candidates.append((p, body, _arch_seq(body)))
     if not candidates:
@@ -832,13 +837,25 @@ def walk_lsm_tree(reader, root_page: int,
     """
     pages_walked = [0]
 
+    gb = getattr(reader, "global_base", 0)
+
     def _visit(page_idx: int) -> Iterator[Tuple[bytes, bytes]]:
         if pages_walked[0] >= max_pages:
             return
-        if not (0 <= page_idx < reader.page_count):
+        # Page references inside the tree are global in split multi-file
+        # archives; bounds-check against the local window after subtracting
+        # the global base (reader.read_page translates again internally).
+        local = page_idx - gb if (gb and page_idx >= gb) else page_idx
+        if not (0 <= local < reader.page_count):
             return
         pages_walked[0] += 1
-        page_type, body = reader.read_page(page_idx, validate_crc=False)
+        # Tree pages can reference positions that live in a pruned/absent
+        # slice of a split archive, or (rarely) a non-LSM page.  Reading
+        # those raises; skip them so the rest of the tree still walks.
+        try:
+            page_type, body = reader.read_page(page_idx, validate_crc=False)
+        except (OSError, IndexError, ValueError):
+            return
         if page_type == PAGE_TYPE_LDIR:
             _, payload = decode_lsm_page_payload(body)
             for _key, child_off in parse_ldir_records(payload, key_length):
@@ -851,7 +868,7 @@ def walk_lsm_tree(reader, root_page: int,
 
 
 def iter_tree_entries(reader, sb: "LsmSuperblock",
-                      max_pages: int = 8192
+                      max_pages: int = 1 << 34
                       ) -> Iterator[Tuple[bytes, bytes]]:
     """Yield every on-disk ``(key, value)`` for ``sb``'s primary ctree.
 
@@ -869,6 +886,57 @@ def iter_tree_entries(reader, sb: "LsmSuperblock",
             value_length=sb.value_length,
             max_pages=max_pages,
         )
+    # In addition to the frozen on-disk ctrees, an L-SB carries a
+    # residual LZ4-compressed mem-tree of cells not yet flushed to a
+    # ctree.  For incremental/diff slices the ctrees are often empty
+    # (ctrees_alive=0) and *all* live entries live here, so we must
+    # yield them too.  Tombstones are yielded with an empty value, the
+    # same convention walk_lsm_tree uses.
+    for cell in _decode_sb_memtree(sb):
+        yield cell.key, (cell.value if cell.alive else b"")
+
+
+def _decode_sb_memtree(sb: "LsmSuperblock"):
+    """Decode an L-SB's residual LZ4 mem-tree into a list of ``LsmCell``.
+
+    The blob in ``memtree_extra_payload`` is a single LZ4 frame
+    (``[c_len BE u32][u_len BE u32][LZ4 bytes]``) whose plaintext is the
+    same compact-cell stream LEAF pages use, decoded with the tree's
+    ``key_length`` / ``value_length``.
+    """
+    from .lsm_cells import decode_cells_compact
+
+    payload = sb.memtree_extra_payload
+    if not payload or sb.memtree_node_count == 0 or sb.key_length == 0:
+        return []
+    enc = sb.memtree_encoding & 0x7F
+    if sb.memtree_encoding & 0x80:
+        raise NotImplementedError("encrypted mem-tree blobs not supported")
+    if enc == 0:
+        decoded = bytes(payload)
+    elif enc == 1:
+        import lz4.block as _lz4_block
+        if len(payload) < 8:
+            return []
+        cs = struct.unpack(">I", payload[0:4])[0]
+        ds = struct.unpack(">I", payload[4:8])[0]
+        if 8 + cs > len(payload):
+            raise ValueError(
+                f"mem-tree LZ4 frame truncated: cs={cs}, payload={len(payload)}"
+            )
+        decoded = _lz4_block.decompress(
+            bytes(payload[8:8 + cs]), uncompressed_size=ds,
+        )
+    else:
+        raise NotImplementedError(
+            f"unknown mem-tree encoding {sb.memtree_encoding}"
+        )
+    return decode_cells_compact(
+        decoded,
+        count=sb.memtree_node_count,
+        fixed_key_size=sb.key_length,
+        fixed_val_size=sb.value_length,
+    )
 
 
 __all__ = [
