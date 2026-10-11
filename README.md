@@ -208,3 +208,18 @@ See `docs/RE_HISTORY.md` for the play-by-play.
 ## License
 
 MIT — see `LICENSE`.
+
+For `.tibx` archives whose first segment is an EFI/FAT boot sector instead
+of an MBR, discover filesystem streams directly:
+
+```bash
+tib tibx-volumes backup.tibx --scan
+tib mount backup.tibx /mnt/tibx --volume-id ID
+```
+
+Replace `ID` with the `volume_id` of the desired NTFS volume from the scan.
+These IDs are archive stream IDs, not partition indexes. `--volume-id`
+overrides `--partition`. Scanning builds the data-map and segment-map indexes
+and may take time on large archives. FAT volumes are listed but cannot be
+mounted by the NTFS reader. If no NTFS stream is found, the archive layout
+requires further investigation; this does not imply backup corruption.

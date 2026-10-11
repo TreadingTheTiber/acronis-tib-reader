@@ -126,7 +126,8 @@ class TibxDiskAdapter:
     volume_id : int, optional
         The data_map stream id for this partition's content.  When
         omitted (default), discovered automatically from the BPB
-        ``total_sectors`` field on first non-bootstrap read.
+        ``total_sectors`` field on first non-bootstrap read. An explicit
+        ID selects a partition stream even when partition_offset is zero.
 
     Notes
     -----
@@ -204,7 +205,7 @@ class TibxDiskAdapter:
         # Partition-view: serve via data_map extents on the matching
         # volume_id.  Falls back to ChunkMapNotImplemented if the
         # discovery + lookup pipeline can't satisfy the read (rare).
-        if self.partition_offset > 0:
+        if self.partition_offset > 0 or self._volume_id is not None:
             return self._read_partition(offset, length)
 
         # Whole-disk view: bootstrap-only path (the MBR and the first
@@ -441,6 +442,11 @@ class TibxDiskAdapter:
 
     def _discover_partition_size(self) -> int:
         """Best-effort recovery of disk-or-partition byte length."""
+        if self._volume_id is not None:
+            info = self._boot_volume_info(self.read(0, 512))
+            if info is None:
+                raise TibxAdapterError("selected stream has no recognized filesystem boot sector")
+            return info["byte_size"]
         if self.partition_offset > 0:
             size = self._partition_size_from_mbr()
             if size is not None:
@@ -476,6 +482,44 @@ class TibxDiskAdapter:
                 return lba_count * SECTOR_SIZE
         return None
 
+    @staticmethod
+    def _boot_volume_info(boot: bytes) -> Optional[dict]:
+        """Recognize supported filesystem BPBs, without treating boot code as MBR."""
+        if len(boot) < 512 or boot[510:512] != b"\x55\xaa":
+            return None
+        bps = int.from_bytes(boot[11:13], "little")
+        spc = boot[13]
+        if bps not in (512, 1024, 2048, 4096) or not spc or spc & (spc - 1):
+            return None
+        if boot[3:11] == b"NTFS    ":
+            sectors = int.from_bytes(boot[40:48], "little")
+            fs = "NTFS"
+        elif boot[82:90] == b"FAT32   " or boot[54:62] in (b"FAT12   ", b"FAT16   "):
+            sectors = int.from_bytes(boot[19:21], "little") or int.from_bytes(boot[32:36], "little")
+            fs = "FAT32" if boot[82:90] == b"FAT32   " else boot[54:62].decode().strip()
+        else:
+            return None
+        if not sectors:
+            return None
+        return {"filesystem": fs, "byte_size": sectors * bps}
+
+    def list_data_volumes(self) -> list:
+        """Probe source-offset-zero streams; IDs are data_map IDs, not MBR indexes.
+
+        Uses the same segment-offset assumptions as partition reads. Unsupported
+        stream layouts are not inferred from segment order.
+        """
+        self._ensure_indexes()
+        volumes = []
+        for vid, (offsets, entries) in sorted(self._extents_by_volume.items()):
+            if not offsets or offsets[0] != 0 or entries[0].end_offset < 512:
+                continue
+            boot = self._read_segment_plaintext(entries[0].value.segment_id)[:512]
+            info = self._boot_volume_info(boot)
+            if info:
+                volumes.append({"volume_id": vid, **info})
+        return volumes
+
     def list_mbr_partitions(self) -> "list[dict]":
         """Return a list describing the four MBR partition entries."""
         try:
@@ -483,6 +527,8 @@ class TibxDiskAdapter:
         except Exception:
             return []
         if len(raw) < 512 or raw[510:512] != b"\x55\xaa":
+            return []
+        if self._boot_volume_info(raw) is not None:
             return []
         out: list[dict] = []
         for i in range(4):
@@ -492,6 +538,8 @@ class TibxDiskAdapter:
                 continue
             first_lba = int.from_bytes(entry[8:12], "little")
             lba_count = int.from_bytes(entry[12:16], "little")
+            if entry[0] not in (0, 0x80) or not first_lba or not lba_count:
+                return []
             out.append(
                 {
                     "type": ptype,

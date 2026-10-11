@@ -711,6 +711,15 @@ def cmd_tibx_volumes(args):
         elif mbr_parts:
             print("Cross-reference: volume_table empty; MBR has "
                   f"{len(mbr_parts)} partitions (see above).")
+    if args.scan:
+        print("Scanning data_map filesystem volumes (building indexes)...", flush=True)
+        with TibxDiskAdapter(args.tibx) as adapter:
+            volumes = adapter.list_data_volumes()
+        for v in volumes:
+            print(f"  volume_id={v['volume_id']}  filesystem={v['filesystem']}  "
+                  f"size={v['byte_size'] / 1024**3:.2f} GiB")
+        if not volumes:
+            print("  No recognized filesystem boot sectors found; this stream layout may be unsupported.")
     return 0
 
 
@@ -802,11 +811,13 @@ def cmd_mount(args):
         print(f"FUSE mount unavailable: {e}", file=sys.stderr)
         print("Install with: pip install fusepy", file=sys.stderr)
         return 1
+    kwargs = {"volume_id": args.volume_id} if args.volume_id is not None else {}
     return fuse_mount(
         args.tib,
         args.mountpoint,
         foreground=args.foreground,
         partition=args.partition,
+        **kwargs,
     )
 
 
@@ -906,6 +917,8 @@ def main(argv=None):
              "(TLV[9]), cross-referenced against the MBR.",
     )
     ap.add_argument("tibx")
+    ap.add_argument("--scan", action="store_true",
+                    help="Build data_map indexes and identify filesystem volume IDs (may take time).")
     ap.set_defaults(func=cmd_tibx_volumes)
 
     ap = sub.add_parser(
@@ -986,6 +999,8 @@ def main(argv=None):
              "Default: 1 (typically the main system partition; "
              "partition 0 is usually 'System Reserved').",
     )
+    ap.add_argument("--volume-id", type=int,
+                    help="Mount this .tibx data_map stream directly, overriding --partition; use tibx-volumes --scan to list IDs.")
     ap.set_defaults(func=cmd_mount)
 
     args = p.parse_args(argv)
