@@ -29,11 +29,18 @@ git clone https://github.com/TreadingTheTiber/acronis-tib-reader.git
 cd acronis-tib-reader
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .                  # core, exposes the `tib` command
-pip install -e '.[fuse]'          # + Linux FUSE mount support
-pip install -e '.[winfsp]'        # + Windows WinFsp mount support
-pip install -e '.[fast]'          # + numpy for ~5× faster index builds
+pip install -e '.[tibx,fuse,fast]'   # typical Linux setup: everything needed to mount .tib/.tibx
 ```
+
+Or pick extras individually (combine them in one install, e.g. `'.[tibx,fuse]'`):
+
+| Extra | Installs | Needed for |
+|---|---|---|
+| *(none)* — `pip install -e .` | the `tib` command, `zstandard` | sector-mode and FS-mode `.tib` |
+| `tibx` | `lz4` | any `.tibx` archive |
+| `fuse` | `fusepy` | `tib mount` on Linux (also needs system `libfuse2`, below) |
+| `winfsp` | `winfspy` | `tib mount` on Windows |
+| `fast` | `numpy` | optional, ~5× faster index builds |
 
 Verify:
 
@@ -43,8 +50,19 @@ tib info /path/to/backup_full_b1_s1_v1.tib
 ```
 
 System requirements:
-- Python 3.9+ (no other mandatory dependencies)
-- Linux FUSE mount needs `libfuse2` and `fusermount` / `fusermount3`
+- Python 3.9+
+- Linux FUSE mount needs the **libfuse 2** shared library (`libfuse.so.2`;
+  fuse3 alone is not enough) plus `fusermount`:
+  - Debian/Ubuntu: `sudo apt install libfuse2` (`libfuse2t64` on Ubuntu 24.04+)
+  - Fedora: `sudo dnf install fuse-libs`
+  - Arch: `sudo pacman -S fuse2`
+  - NixOS: fusepy can't find libraries in `/nix/store`, so point it there
+    explicitly, e.g. `environment.variables.FUSE_LIBRARY_PATH =
+    "${pkgs.fuse.out}/lib/libfuse.so.2";` in your system config.
+
+  If `tib mount` reports "fusepy is not installed" even though it is, run
+  `python -c "import fuse"` — `OSError: Unable to find libfuse` means the
+  system library above is missing.
 
 ## Quickstart
 
@@ -208,3 +226,18 @@ See `docs/RE_HISTORY.md` for the play-by-play.
 ## License
 
 MIT — see `LICENSE`.
+
+For `.tibx` archives whose first segment is an EFI/FAT boot sector instead
+of an MBR, discover filesystem streams directly:
+
+```bash
+tib tibx-volumes backup.tibx --scan
+tib mount backup.tibx /mnt/tibx --volume-id ID
+```
+
+Replace `ID` with the `volume_id` of the desired NTFS volume from the scan.
+These IDs are archive stream IDs, not partition indexes. `--volume-id`
+overrides `--partition`. Scanning builds the data-map and segment-map indexes
+and may take time on large archives. FAT volumes are listed but cannot be
+mounted by the NTFS reader. If no NTFS stream is found, the archive layout
+requires further investigation; this does not imply backup corruption.

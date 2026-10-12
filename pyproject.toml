@@ -27,9 +27,13 @@ classifiers = [
 dependencies = [
     # numpy is a fast path for the chunk-map decoder; the package falls back
     # to pure-Python if it's not present.
+    # zstandard is imported unconditionally by tibread.tibx (loaded from
+    # tibread/__init__), so it is required even for plain .tib use.
+    "zstandard>=0.15",
 ]
 
 [project.optional-dependencies]
+tibx = ["lz4>=3.0"]
 fuse = ["fusepy>=3.0"]
 winfsp = ["winfspy>=0.8"]
 fast = ["numpy>=1.20"]

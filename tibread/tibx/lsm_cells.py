@@ -152,7 +152,7 @@ def _decompress_lz4_multiblock(stream: bytes, total_out: int) -> bytes:
     emitted bytes as its dictionary (``LZ4_decompress_safe_continue``).
     """
     if _lz4_block is None:
-        raise RuntimeError("python-lz4 is required to decode LZ4 LSM pages")
+        raise RuntimeError("lz4 is required to decode LZ4 LSM pages (pip install lz4)")
     out = bytearray()
     pos = 0
     while pos < len(stream):

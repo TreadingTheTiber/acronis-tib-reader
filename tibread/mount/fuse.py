@@ -171,7 +171,7 @@ class _NtfsFS(Operations if FUSE else object):
         }
 
 
-def _open_tibx_volume(tibx_path: str, partition: int):
+def _open_tibx_volume(tibx_path: str, partition: int, *, volume_id=None):
     """Open a ``.tibx`` archive, choose a partition, and return ``(vol, adapter)``.
 
     The adapter is returned so the caller can keep it alive (and close
@@ -179,11 +179,24 @@ def _open_tibx_volume(tibx_path: str, partition: int):
 
     ``partition`` is an MBR partition index (0-based).  If the index is
     out of range a ``ValueError`` is raised with the available choices.
+    An explicit ``volume_id`` selects a data_map stream instead of the MBR.
     """
     from ..tibx import TibxDiskAdapter
     from ..ntfs import NtfsVolume
 
     print(f"[tibread] opening {tibx_path} as .tibx archive...")
+    if volume_id is not None:
+        adapter = TibxDiskAdapter(tibx_path, volume_id=volume_id)
+        try:
+            print(f"[tibread] opening data_map volume {volume_id}; building indexes...")
+            info = adapter._boot_volume_info(adapter.read(0, 512))
+            if info is None or info["filesystem"] != "NTFS":
+                raise ValueError(f"data_map volume {volume_id} is not a recognized NTFS volume")
+            vol = NtfsVolume(adapter, build_index=True)
+        except Exception:
+            adapter.close()
+            raise
+        return vol, adapter
     # First open a temporary whole-disk adapter just to enumerate the
     # MBR.  This is cheap (256 KiB bootstrap read) and avoids holding
     # two live readers when we know which partition we want.
@@ -192,7 +205,7 @@ def _open_tibx_volume(tibx_path: str, partition: int):
     if not partitions:
         raise ValueError(
             f"{tibx_path}: no MBR partitions found in the source disk; "
-            f"cannot mount."
+            f"run tib tibx-volumes <archive> --scan, then mount with --volume-id ID."
         )
     if partition < 0 or partition >= len(partitions):
         choices = ", ".join(
@@ -222,7 +235,7 @@ def _open_tibx_volume(tibx_path: str, partition: int):
 
 
 def fuse_mount(tib_path: str, mountpoint: str, *, foreground: bool = False,
-               cache_blocks: int = 128, partition: int = 1) -> int:
+               cache_blocks: int = 128, partition: int = 1, volume_id=None) -> int:
     """Mount the backup's NTFS volume at *mountpoint*. Returns 0 on success.
 
     Routes to the appropriate adapter based on the input file:
@@ -240,6 +253,8 @@ def fuse_mount(tib_path: str, mountpoint: str, *, foreground: bool = False,
     Detection is by file extension or by the ``QARCH`` magic at the
     head of page 0 (see :func:`is_tibx_file`).
     """
+    if volume_id is not None and not is_tibx_file(tib_path):
+        raise ValueError("--volume-id is only supported for .tibx archives")
     if FUSE is None:
         print("ERROR: fusepy is not installed. Run: pip install fusepy", file=sys.stderr)
         return 1
@@ -248,7 +263,8 @@ def fuse_mount(tib_path: str, mountpoint: str, *, foreground: bool = False,
 
     adapter = None
     if is_tibx_file(tib_path):
-        vol, adapter = _open_tibx_volume(tib_path, partition)
+        kwargs = {"volume_id": volume_id} if volume_id is not None else {}
+        vol, adapter = _open_tibx_volume(tib_path, partition, **kwargs)
         total = getattr(vol, "total_files", None)
         if total:
             print(f"[tibread] {total:,} files indexed; mounting at {mountpoint}")

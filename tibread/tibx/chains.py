@@ -225,7 +225,7 @@ def _decode_memtree_cells(sb: LsmSuperblock):
         decoded = bytes(payload)
     elif sb.memtree_encoding & 0x7F == 1:
         if _lz4_block is None:
-            raise RuntimeError("python-lz4 is required to decode mem-tree blobs")
+            raise RuntimeError("lz4 is required to decode mem-tree blobs (pip install lz4)")
         if len(payload) < 8:
             return []
         cs = struct.unpack(">I", payload[0:4])[0]
