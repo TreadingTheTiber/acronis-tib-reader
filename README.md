@@ -30,7 +30,8 @@ cd acronis-tib-reader
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .                  # core, exposes the `tib` command
-pip install -e '.[fuse]'          # + Linux FUSE mount support
+pip install -e '.[tibx]'          # + zstandard/lz4, required for .tibx archives
+pip install -e '.[fuse]'          # + Linux FUSE mount support (needs libfuse2)
 pip install -e '.[winfsp]'        # + Windows WinFsp mount support
 pip install -e '.[fast]'          # + numpy for ~5× faster index builds
 ```

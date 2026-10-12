@@ -30,6 +30,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+tibx = ["zstandard>=0.15", "lz4>=3.0"]
 fuse = ["fusepy>=3.0"]
 winfsp = ["winfspy>=0.8"]
 fast = ["numpy>=1.20"]
